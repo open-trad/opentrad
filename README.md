@@ -35,3 +35,7 @@ AGPL 的含义：你可以自由使用、修改、分发 OpenTrad，但任何修
 ## 贡献
 
 见 [CONTRIBUTING.md](CONTRIBUTING.md)。目前处于 BDFL（仁慈独裁者）阶段，核心方向由项目发起人决定。欢迎 issue 和 discussion，PR 请先提 issue 讨论。
+
+---
+
+[![CI](https://github.com/open-trad/opentrad/actions/workflows/ci.yml/badge.svg)](https://github.com/open-trad/opentrad/actions/workflows/ci.yml)
