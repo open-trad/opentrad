@@ -39,3 +39,27 @@
 **倾向**：M1 开始做 browser_open 工具时再实测体积，按真实数据选方案 A 或 B。方案 C 运维成本高不推荐。
 
 **不要在 M0 阶段解决**：M0 连 Playwright 都不引入，过早决策没依据。
+
+## TD-002 preload bundle 含 zod（138KB）
+
+**来源**：Issue #7 IPC 实现时观察（2026-04-24）
+
+**触发时机**：**M1 性能打磨时决策**（可延后）
+
+**状态**：`open`
+
+**详情**：
+
+preload 脚本 `import { IpcChannels } from '@opentrad/shared'` 会把整个 `@opentrad/shared` 模块图 bundle 进来——包括所有 zod schema（`WireCCEventSchema` / `CCEventSchema` 等），导致 preload 产出 138KB（其中 100KB+ 是 zod）。
+
+问题：preload 每次 BrowserWindow 启动都加载，体积直接影响窗口首次渲染速度。M0 性能目标里"UI 响应（点击 → 反馈）≤ 100ms"对此敏感。
+
+**选项**：
+
+1. **A. `src/common/ipc-channels.ts` 本地定义 IpcChannels**（架构文档 §2 就是这么设计的），preload 不 import `@opentrad/shared`。优点：preload bundle 降到 <10KB；缺点：IpcChannels 常量要在两处维护（shared 和 common，但 shared 是源头 common 抄）。
+2. **B. 改 `@opentrad/shared` 拆两个 entry**：`@opentrad/shared/ipc` 只导出 IPC 常量（纯数据），`@opentrad/shared` 原路径含 zod schema。
+3. **C. 配 vite `build.rollupOptions.output.manualChunks` 手工分离 zod**：让 preload 只打包用到的代码。vite 7+ 的 tree-shake 对 re-export chain 处理不完美，可能需要 explicit 配置。
+
+**倾向**：**A**，和架构文档 §2 目录结构一致（`src/common/ipc-channels.ts` 本就规划存在）。M1 实现。
+
+**不要在 M0 阶段解决**：功能正确优先；preload 138KB 对 dev/build 流程无影响，只是 window 启动多耗 ~10ms。

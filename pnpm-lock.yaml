@@ -35,6 +35,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@opentrad/cc-adapter':
+        specifier: workspace:^
+        version: link:../../packages/cc-adapter
       electron:
         specifier: ^41.3.0
         version: 41.3.0
