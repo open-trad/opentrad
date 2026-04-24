@@ -44,6 +44,11 @@
         "x64",
         "arm64"
       ]
-    }
+    },
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild",
+      "@biomejs/biome"
+    ]
   }
 }
