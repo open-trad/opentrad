@@ -1,0 +1,29 @@
+{
+  "name": "opentrad-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Open-source AI workbench for global traders",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/open-trad/opentrad.git"
+  },
+  "license": "AGPL-3.0-only",
+  "author": "OpenTrad contributors",
+  "engines": {
+    "node": ">=20.18.0",
+    "pnpm": ">=10.0.0"
+  },
+  "packageManager": "pnpm@10.0.0",
+  "scripts": {
+    "dev": "pnpm --filter @opentrad/desktop dev",
+    "build": "pnpm -r build",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0",
+    "typescript": "^5.5.0"
+  }
+}
