@@ -1,15 +1,26 @@
 // Preload 脚本：contextBridge 暴露 typed IPC API 给 renderer。
-// 对应 03-architecture.md §2 apps/desktop/src/main/preload.ts。
+// 对应 03-architecture.md §2 apps/desktop/src/main/preload.ts + §3 IPC 协议。
 //
-// M0 范围：框架占位，暴露一个空 api 对象让 renderer 能 import 不报错。
-// Issue #7（IPC 通信）里补全实际 channel（cc/skill/session/settings）。
+// sandbox:true 下 preload 的能力受限：
+// - 可用：contextBridge、ipcRenderer（Electron 白名单）
+// - 不可用：任意 require、fs、child_process 等 Node API
+// 这是 03-architecture.md §9 安全边界的一部分。
 
-import { contextBridge } from "electron";
+import type { CCStatus } from "@opentrad/shared";
+import { IpcChannels } from "@opentrad/shared";
+import { contextBridge, ipcRenderer } from "electron";
 
-// M0 占位 API。Issue #7 会把各 channel 的 invoke 方法填进来。
+// 对 renderer 暴露的 API。每个 domain 对应一个子对象。
 const api = {
-  // IPC 方法待 Issue #7 实现
-};
+  cc: {
+    status(): Promise<CCStatus> {
+      return ipcRenderer.invoke(IpcChannels.CCStatus);
+    },
+  },
+  // skill / session / settings / risk-gate 后续补
+} as const;
+
+export type OpenTradApi = typeof api;
 
 if (process.contextIsolated) {
   try {
@@ -19,8 +30,5 @@ if (process.contextIsolated) {
   }
 } else {
   // contextIsolation 被关闭时的降级（生产不走这里）
-  // @ts-expect-error — 直接挂 window 的非标准用法仅限开发降级
   window.api = api;
 }
-
-export type OpenTradApi = typeof api;
