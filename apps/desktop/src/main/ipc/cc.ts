@@ -1,15 +1,71 @@
 // cc:* IPC handlers。对应 03-architecture.md §3 IPC channels + §4.1 Process Manager。
-// M0 范围：只实现 cc:status（Issue #7 验收要求）。
-// 后续里程碑：cc:start-task / cc:cancel-task / cc:event（Issue #8 + M1）。
+// 实现范围：
+// - cc:status（Issue #7）：CC 安装 + 登录状态查询
+// - cc:start-task（Issue #8）：spawn CC 任务，立刻返回 sessionId
+// - cc:cancel-task（Issue #8）：按 sessionId 取消
+// - cc:event（Issue #8）：main 向 renderer 推 domain CCEvent 流
+//
+// M0 阶段简化：prompt 硬编码 "Say hi in Chinese"，mcp-config 写一个空文件；
+// skill 管理和真实 prompt composer 在 M1。
 
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { type CCManager, redactEmail } from "@opentrad/cc-adapter";
-import { type CCStatus, IpcChannels } from "@opentrad/shared";
+import {
+  type CCCancelTaskRequest,
+  type CCStartTaskResponse,
+  type CCStatus,
+  IpcChannels,
+} from "@opentrad/shared";
 import { ipcMain } from "electron";
 
 export function registerCcHandlers(manager: CCManager): void {
   ipcMain.handle(IpcChannels.CCStatus, async (): Promise<CCStatus> => {
     return buildCcStatus(manager);
   });
+
+  ipcMain.handle(IpcChannels.CCStartTask, async (event): Promise<CCStartTaskResponse> => {
+    // M0：忽略 renderer 传的 skillId/inputs，固定 demo prompt。M1 接 skill runtime。
+    const sessionId = randomUUID();
+    const tmpDir = await mkdtemp(join(tmpdir(), "opentrad-m0-"));
+    const mcpConfigPath = join(tmpDir, "mcp-config.json");
+    await writeFile(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
+
+    const handle = await manager.startTask({
+      sessionId,
+      prompt: "Say hi in Chinese",
+      mcpConfigPath,
+      allowedTools: [],
+      model: "haiku",
+    });
+
+    // 异步把 events 推给这个 webContents；结束后清临时目录。
+    // 不 await 这个 IIFE —— startTask 要立刻返回 sessionId 给 renderer。
+    void (async () => {
+      try {
+        for await (const evt of handle.events) {
+          if (event.sender.isDestroyed()) break;
+          event.sender.send(IpcChannels.CCEvent, evt);
+        }
+      } catch (err) {
+        console.error("[cc:event] stream error", err);
+      } finally {
+        await rm(tmpDir, { recursive: true, force: true });
+      }
+    })();
+
+    return { sessionId };
+  });
+
+  ipcMain.handle(
+    IpcChannels.CCCancelTask,
+    async (_event, req: CCCancelTaskRequest): Promise<void> => {
+      const handle = manager.activeTasks.get(req.sessionId);
+      if (handle) await handle.cancel();
+    },
+  );
 }
 
 // 合成 CCStatus：detectInstallation + getAuthStatus 两步的合并视图。

@@ -6,7 +6,13 @@
 // - 不可用：任意 require、fs、child_process 等 Node API
 // 这是 03-architecture.md §9 安全边界的一部分。
 
-import type { CCStatus } from "@opentrad/shared";
+import type {
+  CCCancelTaskRequest,
+  CCEvent,
+  CCStartTaskRequest,
+  CCStartTaskResponse,
+  CCStatus,
+} from "@opentrad/shared";
 import { IpcChannels } from "@opentrad/shared";
 import { contextBridge, ipcRenderer } from "electron";
 
@@ -15,6 +21,20 @@ const api = {
   cc: {
     status(): Promise<CCStatus> {
       return ipcRenderer.invoke(IpcChannels.CCStatus);
+    },
+    startTask(req: CCStartTaskRequest): Promise<CCStartTaskResponse> {
+      return ipcRenderer.invoke(IpcChannels.CCStartTask, req);
+    },
+    cancelTask(req: CCCancelTaskRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.CCCancelTask, req);
+    },
+    // 订阅 CC 事件流。返回 unsubscribe 函数，renderer 在 useEffect 清理时调用。
+    onEvent(handler: (evt: CCEvent) => void): () => void {
+      const listener = (_event: unknown, evt: CCEvent): void => handler(evt);
+      ipcRenderer.on(IpcChannels.CCEvent, listener);
+      return () => {
+        ipcRenderer.removeListener(IpcChannels.CCEvent, listener);
+      };
     },
   },
   // skill / session / settings / risk-gate 后续补
