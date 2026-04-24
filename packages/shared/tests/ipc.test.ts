@@ -60,6 +60,15 @@ describe("CCStatus schema", () => {
       }).success,
     ).toBe(false);
   });
+
+  it("accepts error message for CC detection failures", () => {
+    expect(
+      CCStatusSchema.safeParse({
+        installed: false,
+        error: "claude binary not found in PATH",
+      }).success,
+    ).toBe(true);
+  });
 });
 
 describe("SessionMeta schema", () => {

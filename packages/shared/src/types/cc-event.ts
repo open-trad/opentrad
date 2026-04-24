@@ -4,6 +4,7 @@
 import { z } from "zod";
 
 // MCP server 在 system/init 事件里的信息。字段结构随 CC 版本可能差异，用 passthrough 容错。
+// TODO(issue-4): tighten schema after real sample
 export const McpServerInfoSchema = z
   .object({
     name: z.string(),
@@ -34,11 +35,13 @@ export const AssistantContentSchema = z.discriminatedUnion("type", [
 export type AssistantContent = z.infer<typeof AssistantContentSchema>;
 
 // result 事件的 data。字段细节待 Issue #4（stream-parser）结合真实样本细化。
+// TODO(issue-4): tighten schema after real sample
 export const ResultDataSchema = z.object({}).passthrough();
 
 export type ResultData = z.infer<typeof ResultDataSchema>;
 
 // rate_limit_event 的 rateLimitInfo。字段同样待 Issue #4 细化。
+// TODO(issue-4): tighten schema after real sample
 export const RateLimitInfoSchema = z.object({}).passthrough();
 
 export type RateLimitInfo = z.infer<typeof RateLimitInfoSchema>;

@@ -54,6 +54,26 @@ describe("CCResult schema", () => {
     expect(CCResultSchema.safeParse(raw).success).toBe(true);
   });
 
+  it("accepts cancelled status (user-initiated kill)", () => {
+    const raw = {
+      sessionId: "abc",
+      status: "cancelled",
+      data: {},
+      exitCode: 130,
+    };
+    expect(CCResultSchema.safeParse(raw).success).toBe(true);
+  });
+
+  it("rejects unknown status value", () => {
+    const raw = {
+      sessionId: "abc",
+      status: "timeout",
+      data: {},
+      exitCode: 1,
+    };
+    expect(CCResultSchema.safeParse(raw).success).toBe(false);
+  });
+
   it("rejects non-integer exitCode", () => {
     const raw = {
       sessionId: "abc",

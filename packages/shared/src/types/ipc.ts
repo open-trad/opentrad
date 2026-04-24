@@ -51,6 +51,8 @@ export type CCCancelTaskRequest = z.infer<typeof CCCancelTaskRequestSchema>;
 
 // -------- cc:status（双向） --------
 // email 是脱敏后的字符串（如 "u***@example.com"），按 03-architecture.md §4.1 F1.3 规定。
+// error 用于 CC 检测失败时告诉 Renderer 出了什么事（如"claude binary not found"
+// 或"auth status command timeout"），UI 层可直接展示给用户。
 
 export const CCStatusSchema = z.object({
   installed: z.boolean(),
@@ -58,6 +60,7 @@ export const CCStatusSchema = z.object({
   loggedIn: z.boolean().optional(),
   email: z.string().optional(),
   authMethod: z.enum(["subscription", "api_key"]).optional(),
+  error: z.string().optional(),
 });
 
 export type CCStatus = z.infer<typeof CCStatusSchema>;

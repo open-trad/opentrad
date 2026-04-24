@@ -29,11 +29,11 @@ export interface CCTaskHandle {
 }
 
 // 任务最终结果。架构文档未直列字段，这里按 result 事件 + 元信息合理补全：
-// 以 sessionId 关联、status 区分成功失败、data 透传 result 事件原 payload、
-// exitCode 记录子进程退出码（便于上层判断是否异常退出）。
+// 以 sessionId 关联、status 三值 union（success/error/cancelled）便于上层做类型保护、
+// data 透传 result 事件原 payload、exitCode 记录子进程退出码（便于判断异常退出）。
 export const CCResultSchema = z.object({
   sessionId: z.string(),
-  status: z.enum(["success", "error"]),
+  status: z.enum(["success", "error", "cancelled"]),
   data: ResultDataSchema,
   exitCode: z.number().int(),
 });
