@@ -1,0 +1,40 @@
+# 默认：git 自动识别文本/二进制，text 类文件 checkout 时强制 LF。
+# 这样 Windows 开发者 clone 后也拿到 LF，不用改 core.autocrlf。
+* text=auto eol=lf
+
+# ---------- 二进制类型：禁用换行符转换 ----------
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.tgz binary
+*.dmg binary
+*.exe binary
+*.node binary
+
+# SVG 是 XML 文本，保 LF
+*.svg text eol=lf
+
+# ---------- Fixture 保真：CC stream-json 真实输出必须 LF ----------
+*.ndjson text eol=lf
+*.jsonl text eol=lf
+
+# ---------- Shell 脚本：Unix 工具链要求 LF ----------
+*.sh text eol=lf
+*.bash text eol=lf
+
+# ---------- Windows 脚本：必须 CRLF 才能被 cmd.exe / PowerShell 正确识别 ----------
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
