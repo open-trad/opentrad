@@ -35,8 +35,15 @@
   },
   "pnpm": {
     "supportedArchitectures": {
-      "os": ["darwin", "linux", "win32"],
-      "cpu": ["x64", "arm64"]
+      "os": [
+        "darwin",
+        "linux",
+        "win32"
+      ],
+      "cpu": [
+        "x64",
+        "arm64"
+      ]
     }
   }
 }
