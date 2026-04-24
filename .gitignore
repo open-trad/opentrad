@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+out/
+build/
+*.tsbuildinfo
+
+# Electron
+release/
+app-builds/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Temporary
+tmp/
+temp/
+.cache/
+
+# OS
+Icon?
+ehthumbs.db
+
+# Claude Code artifacts（项目级，不污染主仓库）
+.claude/
+.mcp.json
+
+# OpenTrad runtime data（如果开发时生成到项目目录）
+.opentrad/
