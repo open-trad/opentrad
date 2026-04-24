@@ -44,11 +44,21 @@ describe("CCTaskOptions schema", () => {
 });
 
 describe("CCResult schema", () => {
+  // 注：data 字段对应 ResultDataSchema（D5 拍板：按 fixture 收紧为必填
+  // durationMs/numTurns/totalCostUsd/isError/uuid）
+  const minimalResultData = {
+    durationMs: 2318,
+    numTurns: 1,
+    totalCostUsd: 0.0074389,
+    isError: false,
+    uuid: "u1",
+  };
+
   it("parses a valid success result", () => {
     const raw = {
       sessionId: "abc",
       status: "success",
-      data: { costUsd: 0.01 },
+      data: minimalResultData,
       exitCode: 0,
     };
     expect(CCResultSchema.safeParse(raw).success).toBe(true);
@@ -58,7 +68,7 @@ describe("CCResult schema", () => {
     const raw = {
       sessionId: "abc",
       status: "cancelled",
-      data: {},
+      data: minimalResultData,
       exitCode: 130,
     };
     expect(CCResultSchema.safeParse(raw).success).toBe(true);
@@ -68,7 +78,7 @@ describe("CCResult schema", () => {
     const raw = {
       sessionId: "abc",
       status: "timeout",
-      data: {},
+      data: minimalResultData,
       exitCode: 1,
     };
     expect(CCResultSchema.safeParse(raw).success).toBe(false);
@@ -78,7 +88,7 @@ describe("CCResult schema", () => {
     const raw = {
       sessionId: "abc",
       status: "error",
-      data: {},
+      data: minimalResultData,
       exitCode: 1.5,
     };
     expect(CCResultSchema.safeParse(raw).success).toBe(false);
