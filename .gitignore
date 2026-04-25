@@ -52,3 +52,7 @@ ehthumbs.db
 
 # OpenTrad runtime data（如果开发时生成到项目目录）
 .opentrad/
+
+# Electron ABI sentinel —— 由 apps/desktop/scripts/ensure-electron-abi.cjs
+# 维护，记录上次 rebuild 后的 binary 指纹，本机状态不进版本控制
+apps/desktop/.electron-abi-sentinel.json

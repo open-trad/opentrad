@@ -4,14 +4,17 @@
   "private": true,
   "main": "./out/main/index.js",
   "scripts": {
+    "predev": "node scripts/ensure-electron-abi.cjs",
     "dev": "electron-vite dev",
+    "prebuild": "node scripts/ensure-electron-abi.cjs",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
     "start": "electron-vite preview",
     "test": "vitest run",
-    "postinstall": "electron-rebuild -f -w better-sqlite3 -w node-pty",
+    "postinstall": "node scripts/ensure-electron-abi.cjs",
     "rebuild:electron": "electron-rebuild -f -w better-sqlite3 -w node-pty",
-    "rebuild:node": "pnpm rebuild better-sqlite3 node-pty"
+    "rebuild:node": "pnpm rebuild better-sqlite3 node-pty",
+    "smoke": "node scripts/smoke-electron-dlopen.cjs"
   },
   "dependencies": {
     "@opentrad/cc-adapter": "workspace:^",
