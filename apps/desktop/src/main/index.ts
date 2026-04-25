@@ -4,9 +4,10 @@
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CCManager } from "@opentrad/cc-adapter";
+import { CCManager, redactEmail } from "@opentrad/cc-adapter";
 import { app, BrowserWindow, dialog } from "electron";
 import { registerIpcHandlers } from "./ipc";
+import { DetectLoopRegistry } from "./services/cc-detect-loop";
 import { createDbServices, type DbServices, getIpcSocketPath } from "./services/db";
 import { createIpcBridgeHandlers } from "./services/ipc-bridge-handlers";
 import { IpcBridgeServer } from "./services/ipc-bridge-server";
@@ -21,6 +22,9 @@ const ccManager = new CCManager();
 
 // 全局 PtyManager 单例：跨窗口共享，路由由 IPC handler 内部 ptyId → webContents 管理。
 const ptyManager = new PtyManager();
+
+// CC 安装状态后台轮询注册表（M1 #21）：onboarding 流程触发，每 webContents 一个 loop。
+const detectLoopRegistry = new DetectLoopRegistry(ccManager, redactEmail);
 
 // McpConfigWriter（M1 #26）：每次 startTask 生成临时 mcp-config，让 CC 通过 stdio
 // 拉起 apps/mcp-server。dev 用 tsx 跑 .ts 入口；electron-builder 打包路径在 M1 #13。
@@ -100,6 +104,7 @@ app.whenReady().then(() => {
     db: dbServices,
     pty: ptyManager,
     mcpWriter,
+    detectLoop: detectLoopRegistry,
   });
   createMainWindow();
 
@@ -132,6 +137,11 @@ app.on("before-quit", async (event) => {
 });
 
 function finalizeShutdown(): void {
+  try {
+    detectLoopRegistry.cleanupAll();
+  } catch (err) {
+    console.error("[main] detect-loop cleanup error", err);
+  }
   try {
     ptyManager.cleanup();
   } catch (err) {

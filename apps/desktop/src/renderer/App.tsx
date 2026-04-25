@@ -6,6 +6,7 @@ import type { CCEvent, CCStatus } from "@opentrad/shared";
 import type { ReactElement } from "react";
 import { useEffect, useState } from "react";
 import { TerminalPane } from "./components/ui/TerminalPane";
+import { OnboardingGate } from "./features/onboarding/OnboardingGate";
 
 type CcStatusState =
   | { kind: "loading" }
@@ -18,6 +19,14 @@ type TaskState =
   | { kind: "finished"; sessionId: string; success: boolean };
 
 export function App(): ReactElement {
+  return (
+    <OnboardingGate>
+      <MainApp />
+    </OnboardingGate>
+  );
+}
+
+function MainApp(): ReactElement {
   const [ccStatus, setCcStatus] = useState<CcStatusState>({ kind: "loading" });
   const [task, setTask] = useState<TaskState>({ kind: "idle" });
   const [events, setEvents] = useState<CCEvent[]>([]);
