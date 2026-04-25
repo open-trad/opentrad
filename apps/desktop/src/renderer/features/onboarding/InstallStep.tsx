@@ -3,17 +3,19 @@
 // 三种用户路径：
 // 1. 自动安装（macOS / Linux）：点"一键安装" → 后端 PTY spawn install.sh →
 //    TerminalPane 显示输出 → install.sh 退出后启动 detect-loop 等 installed=true
-// 2. 手动安装（Windows，A3 降级）：UI 显示 docs.claude.com 链接 + "我已装好"
+// 2. 手动安装（Windows，A3 降级）：UI 显示 docs.claude.com 链接 + "已安装,继续"
 //    按钮 → 点击后启动 detect-loop
 // 3. 跳过引导：进 main 但保持 onboarded=false（issue body 验收要求）
 //
-// 隐私：UI 醒目提示安装命令直接来自 claude.ai 官方，可读完再决定。
+// 视觉分组（manual 路径）：info 提示 → 文档链接 → 操作按钮，"为什么 → 怎么办 → 做完了"
+// 隐私（auto 路径）：UI 醒目提示安装命令直接来自 claude.ai 官方，可读完再决定。
 
 import type {
   CCStatus,
   InstallerSupportsAutoInstallResponse,
   PtyDataEvent,
 } from "@opentrad/shared";
+import { ExternalLink, Loader2 } from "lucide-react";
 import { type ReactElement, useEffect, useState } from "react";
 
 export interface InstallStepProps {
@@ -46,6 +48,8 @@ type Phase =
   | DetectingPhase
   | { kind: "error"; message: string };
 
+const ISSUES_URL = "https://github.com/open-trad/opentrad/issues";
+
 export function InstallStep({ onInstalled, onSkip }: InstallStepProps): ReactElement {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
 
@@ -60,7 +64,7 @@ export function InstallStep({ onInstalled, onSkip }: InstallStepProps): ReactEle
         ]);
         if (cancelled) return;
         if (status.installed) {
-          // 已经装好，直接推进（不进 onboarding）
+          // 已经装好,直接推进(不进 onboarding)
           onInstalled(status);
           return;
         }
@@ -114,7 +118,7 @@ export function InstallStep({ onInstalled, onSkip }: InstallStepProps): ReactEle
     });
     const offExit = window.api.pty.onExit((evt) => {
       if (evt.ptyId !== ptyId) return;
-      // PTY 退出后启动 detect-loop（每 3s 检测一次，5min 兜底）
+      // PTY 退出后启动 detect-loop（每 3s 检测一次,5min 兜底）
       void window.api.cc.detectLoopStart({ intervalMs: 3000, maxDurationMs: 5 * 60 * 1000 });
       setPhase({ kind: "detecting", support });
     });
@@ -134,13 +138,14 @@ export function InstallStep({ onInstalled, onSkip }: InstallStepProps): ReactEle
   // ----- 渲染 -----
 
   const palette = {
-    bg: "#0f172a",
     cardBg: "#fff",
     border: "#e5e7eb",
     primary: "#2563eb",
     text: "#111827",
     muted: "#6b7280",
-    accent: "#dbeafe",
+    info: "#dbeafe",
+    infoText: "#1e3a8a",
+    soft: "#f3f4f6",
   };
 
   const containerStyle: React.CSSProperties = {
@@ -171,19 +176,51 @@ export function InstallStep({ onInstalled, onSkip }: InstallStepProps): ReactEle
     cursor: "pointer",
     fontSize: "0.95rem",
   };
-  const buttonSecondary: React.CSSProperties = {
-    background: "white",
-    color: palette.text,
-    border: `1px solid ${palette.border}`,
-    padding: "0.6rem 1.2rem",
-    borderRadius: 6,
+
+  // 底部小字链接（兜底求助 + 跳过引导）
+  const footerLinkStyle: React.CSSProperties = {
+    color: palette.muted,
+    fontSize: "0.8rem",
+    textDecoration: "none",
     cursor: "pointer",
-    fontSize: "0.95rem",
+    background: "none",
+    border: "none",
+    padding: 0,
+    fontFamily: "inherit",
   };
+
+  const footer = (
+    <div
+      style={{
+        marginTop: "1.25rem",
+        display: "flex",
+        gap: "1.5rem",
+        justifyContent: "center",
+        alignItems: "center",
+      }}
+    >
+      <a
+        href={ISSUES_URL}
+        target="_blank"
+        rel="noreferrer"
+        onClick={(e) => {
+          e.preventDefault();
+          window.open(ISSUES_URL, "_blank", "noopener,noreferrer");
+        }}
+        style={{ ...footerLinkStyle, textDecoration: "underline" }}
+      >
+        安装遇到问题?
+      </a>
+      <button type="button" onClick={onSkip} style={footerLinkStyle}>
+        暂时跳过(部分功能不可用)
+      </button>
+    </div>
+  );
 
   if (phase.kind === "loading") {
     return (
       <div style={containerStyle}>
+        <SpinKeyframes />
         <div style={cardStyle}>
           <div style={{ color: palette.muted }}>检测中…</div>
         </div>
@@ -194,6 +231,7 @@ export function InstallStep({ onInstalled, onSkip }: InstallStepProps): ReactEle
   if (phase.kind === "error") {
     return (
       <div style={containerStyle}>
+        <SpinKeyframes />
         <div style={cardStyle}>
           <h2 style={{ margin: "0 0 1rem", color: "#b91c1c" }}>初始化失败</h2>
           <pre
@@ -207,76 +245,84 @@ export function InstallStep({ onInstalled, onSkip }: InstallStepProps): ReactEle
           >
             {phase.message}
           </pre>
-          <button type="button" onClick={onSkip} style={{ ...buttonSecondary, marginTop: "1rem" }}>
-            跳过引导
-          </button>
         </div>
+        {footer}
       </div>
     );
   }
 
   return (
     <div style={containerStyle}>
+      <SpinKeyframes />
       <div style={cardStyle}>
         <h1 style={{ margin: "0 0 0.5rem", fontSize: "1.5rem" }}>欢迎使用 OpenTrad</h1>
         <p style={{ margin: "0 0 1.5rem", color: palette.muted }}>第 1 步:安装 Claude Code</p>
 
-        {/* 自动安装路径（macOS / Linux）*/}
         {phase.support.supportsAutoInstall ? (
           <AutoInstallSection
             phase={phase}
             onAutoInstall={handleAutoInstall}
             buttonPrimary={buttonPrimary}
-            buttonSecondary={buttonSecondary}
             palette={palette}
-            onSkip={onSkip}
           />
         ) : (
           <ManualInstallSection
             support={phase.support}
             onAlreadyInstalled={handleAlreadyInstalled}
             buttonPrimary={buttonPrimary}
-            buttonSecondary={buttonSecondary}
             palette={palette}
-            onSkip={onSkip}
             phase={phase}
           />
         )}
       </div>
+      {footer}
     </div>
   );
 }
 
-interface SectionProps {
-  buttonPrimary: React.CSSProperties;
-  buttonSecondary: React.CSSProperties;
-  palette: { muted: string; accent: string; border: string };
-  onSkip: () => void;
+// inline keyframes 注入：避免引 Tailwind / 全局 CSS
+function SpinKeyframes(): ReactElement {
+  return (
+    <style>{`@keyframes opentrad-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+  );
 }
 
-interface AutoInstallSectionProps extends SectionProps {
+const spinIconStyle: React.CSSProperties = {
+  animation: "opentrad-spin 1s linear infinite",
+};
+
+interface SectionPalette {
+  muted: string;
+  info: string;
+  infoText: string;
+  border: string;
+  soft: string;
+  primary: string;
+}
+
+interface AutoInstallSectionProps {
   phase: ReadyPhase | InstallingPhase | DetectingPhase;
   onAutoInstall: () => void;
+  buttonPrimary: React.CSSProperties;
+  palette: SectionPalette;
 }
 
 function AutoInstallSection({
   phase,
   onAutoInstall,
   buttonPrimary,
-  buttonSecondary,
   palette,
-  onSkip,
 }: AutoInstallSectionProps): ReactElement {
   return (
     <div>
       <div
         style={{
-          background: palette.accent,
+          background: palette.info,
           padding: "0.75rem 1rem",
           borderRadius: 6,
           fontSize: "0.85rem",
           marginBottom: "1rem",
-          color: "#1e3a8a",
+          color: palette.infoText,
         }}
       >
         🛡 安装命令直接来自 claude.ai 官方:
@@ -289,14 +335,9 @@ function AutoInstallSection({
       </div>
 
       {phase.kind === "ready" ? (
-        <div style={{ display: "flex", gap: "0.75rem" }}>
-          <button type="button" onClick={onAutoInstall} style={buttonPrimary}>
-            一键安装 Claude Code
-          </button>
-          <button type="button" onClick={onSkip} style={buttonSecondary}>
-            跳过引导
-          </button>
-        </div>
+        <button type="button" onClick={onAutoInstall} style={buttonPrimary}>
+          一键安装 Claude Code
+        </button>
       ) : null}
 
       {phase.kind === "installing" ? (
@@ -323,19 +364,19 @@ function AutoInstallSection({
       ) : null}
 
       {phase.kind === "detecting" ? (
-        <div style={{ color: palette.muted, fontSize: "0.9rem" }}>
-          正在检测安装是否完成…(每 3 秒查一次,最长 5 分钟)
-        </div>
+        <DetectingIndicator palette={palette} hintMaxText="最多等待 5 分钟" />
       ) : null}
     </div>
   );
 }
 
-interface ManualInstallSectionProps extends SectionProps {
+interface ManualInstallSectionProps {
   support: InstallerSupportsAutoInstallResponse;
   onAlreadyInstalled: () => void;
-  // 接受 union 简化父组件类型；installing 在 manual 路径运行时不会出现
-  // （只 auto 路径转入），渲染层降级当 ready 处理
+  buttonPrimary: React.CSSProperties;
+  palette: SectionPalette;
+  // 接受 union 简化父组件类型;installing 在 manual 路径运行时不会出现
+  // (只 auto 路径转入),渲染层降级当 ready 处理
   phase: ReadyPhase | InstallingPhase | DetectingPhase;
 }
 
@@ -343,66 +384,94 @@ function ManualInstallSection({
   support,
   onAlreadyInstalled,
   buttonPrimary,
-  buttonSecondary,
   palette,
-  onSkip,
   phase,
 }: ManualInstallSectionProps): ReactElement {
   return (
     <div>
+      {/* 第 1 段:为什么(蓝底 info) */}
       <div
         style={{
-          background: "#fef3c7",
+          background: palette.info,
           padding: "0.75rem 1rem",
           borderRadius: 6,
           fontSize: "0.9rem",
           marginBottom: "1rem",
-          color: "#92400e",
+          color: palette.infoText,
         }}
       >
-        OpenTrad 当前在 <strong>{support.platform}</strong> 上不提供自动安装 Claude
-        Code。请按官方文档手动安装,装完后点"我已装好"按钮。
+        Windows 上需要手动安装 Claude Code。点击下方链接按官方文档完成安装,然后回到这里继续。
       </div>
 
-      <div style={{ marginBottom: "1rem" }}>
+      {/* 第 2 段:怎么办(浅灰底 + 外链 icon) */}
+      <div
+        style={{
+          background: palette.soft,
+          border: `1px solid ${palette.border}`,
+          padding: "0.75rem 1rem",
+          borderRadius: 6,
+          marginBottom: "1.25rem",
+        }}
+      >
         <a
           href={support.manualInstallUrl}
           target="_blank"
           rel="noreferrer"
           onClick={(e) => {
             e.preventDefault();
-            // shell.openExternal 会被 main 进程 IPC 拦截;此处直接打开外链
             window.open(support.manualInstallUrl, "_blank", "noopener,noreferrer");
           }}
           style={{
-            color: "#2563eb",
+            color: palette.primary,
             textDecoration: "underline",
             fontSize: "0.95rem",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "0.4rem",
           }}
         >
-          打开官方安装文档 →
+          打开官方安装文档
+          <ExternalLink size={14} aria-hidden="true" />
         </a>
       </div>
 
-      <div style={{ display: "flex", gap: "0.75rem" }}>
-        <button
-          type="button"
-          onClick={onAlreadyInstalled}
-          style={buttonPrimary}
-          disabled={phase.kind === "detecting"}
-        >
-          {phase.kind === "detecting" ? "检测中…" : "我已装好,重新检测"}
-        </button>
-        <button type="button" onClick={onSkip} style={buttonSecondary}>
-          跳过引导
-        </button>
-      </div>
+      {/* 第 3 段:做完了(主按钮) */}
+      <button
+        type="button"
+        onClick={onAlreadyInstalled}
+        style={buttonPrimary}
+        disabled={phase.kind === "detecting"}
+      >
+        {phase.kind === "detecting" ? "检测中…" : "已安装,继续"}
+      </button>
 
       {phase.kind === "detecting" ? (
-        <div style={{ marginTop: "1rem", color: palette.muted, fontSize: "0.85rem" }}>
-          正在检测…(每 3 秒查一次,1 分钟超时)
-        </div>
+        <DetectingIndicator palette={palette} hintMaxText="最多等待 1 分钟" />
       ) : null}
+    </div>
+  );
+}
+
+function DetectingIndicator({
+  palette,
+  hintMaxText,
+}: {
+  palette: { muted: string };
+  hintMaxText: string;
+}): ReactElement {
+  return (
+    <div
+      style={{
+        marginTop: "1rem",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "0.5rem",
+        color: palette.muted,
+        fontSize: "0.9rem",
+      }}
+    >
+      <Loader2 size={16} style={spinIconStyle} aria-hidden="true" />
+      <span>正在检测 Claude Code({hintMaxText})…</span>
     </div>
   );
 }
