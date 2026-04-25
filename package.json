@@ -26,6 +26,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
+    "@electron/rebuild": "^4.0.4",
     "@opentrad/cc-adapter": "workspace:^",
     "@opentrad/shared": "workspace:^",
     "@opentrad/stream-parser": "workspace:^",
