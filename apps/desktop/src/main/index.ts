@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 import { CCManager } from "@opentrad/cc-adapter";
 import { app, BrowserWindow, dialog } from "electron";
 import { registerIpcHandlers } from "./ipc";
-import { createDbServices, type DbServices } from "./services/db";
+import { createDbServices, type DbServices, getIpcSocketPath } from "./services/db";
+import { createIpcBridgeHandlers } from "./services/ipc-bridge-handlers";
+import { IpcBridgeServer } from "./services/ipc-bridge-server";
 import { type AppLock, AppLockHeldError, acquireAppLock } from "./services/lock";
 import { PtyManager } from "./services/pty-manager";
 
@@ -19,9 +21,10 @@ const ccManager = new CCManager();
 // 全局 PtyManager 单例：跨窗口共享，路由由 IPC handler 内部 ptyId → webContents 管理。
 const ptyManager = new PtyManager();
 
-// 启动时初始化、退出时释放：lock + db。
+// 启动时初始化、退出时释放：lock + db + ipc-bridge server。
 let appLock: AppLock | undefined;
 let dbServices: DbServices | undefined;
+let ipcBridgeServer: IpcBridgeServer | undefined;
 
 // contextIsolation + sandbox 按 03-architecture.md §9「沙箱和权限」开启。
 function createMainWindow(): BrowserWindow {
@@ -71,6 +74,17 @@ app.whenReady().then(() => {
   // SQLite 初始化（M1 #19 验收 1）：~/.opentrad/opentrad.db 自动建表。
   dbServices = createDbServices();
 
+  // IPC bridge server（M1 #25 验收 1）：~/.opentrad/ipc.sock 文件创建（macOS/Linux）
+  // / Windows named pipe 建立。mcp-server 子进程通过它调 4 个 RPC。
+  // 启动失败不阻塞 app（mcp-server 端有 graceful degrade，echo 类 safe tool 仍可用）。
+  ipcBridgeServer = new IpcBridgeServer({
+    socketPath: getIpcSocketPath(),
+    handlers: createIpcBridgeHandlers(dbServices),
+  });
+  ipcBridgeServer.start().catch((err) => {
+    console.error("[main] IPC bridge server start failed", err);
+  });
+
   registerIpcHandlers(ccManager, dbServices, ptyManager);
   createMainWindow();
 
@@ -107,6 +121,15 @@ function finalizeShutdown(): void {
     ptyManager.cleanup();
   } catch (err) {
     console.error("[main] pty cleanup error", err);
+  }
+  // IPC bridge server stop 是 async，但 finalizeShutdown 里同步调；
+  // 用 .catch 保护，主进程已经在退出路径上，stop 失败也无所谓
+  try {
+    void ipcBridgeServer?.stop().catch((err) => {
+      console.error("[main] ipc-bridge stop error", err);
+    });
+  } catch (err) {
+    console.error("[main] ipc-bridge stop sync error", err);
   }
   try {
     dbServices?.close();

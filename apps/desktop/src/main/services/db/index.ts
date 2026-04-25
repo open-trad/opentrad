@@ -41,7 +41,7 @@ export { AuditLogService } from "./audit-log";
 export { EventService } from "./events";
 export { type OpenDbOptions, openDatabase } from "./init";
 export { InstalledSkillService } from "./installed-skills";
-export { getDbPath, getLockPath, getUserDataDir } from "./paths";
+export { getDbPath, getDraftsDir, getIpcSocketPath, getLockPath, getUserDataDir } from "./paths";
 export { RiskRuleService } from "./risk-rules";
 export { SCHEMA_SQL, SCHEMA_VERSION } from "./schema";
 export { SessionService } from "./sessions";
