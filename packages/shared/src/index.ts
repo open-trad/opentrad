@@ -7,6 +7,7 @@
 
 export * from "./types/cc-event";
 export * from "./types/cc-task";
+export * from "./types/db";
 export * from "./types/ipc";
 export * from "./types/risk-gate";
 export * from "./types/skill";

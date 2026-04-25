@@ -2,9 +2,16 @@
 // 新增 domain 时在此 register 进来。
 
 import type { CCManager } from "@opentrad/cc-adapter";
+import type { DbServices } from "../services/db";
 import { registerCcHandlers } from "./cc";
+import { registerInstalledSkillHandlers } from "./installed-skill";
+import { registerSessionHandlers } from "./session";
+import { registerSettingsHandlers } from "./settings";
 
-export function registerIpcHandlers(manager: CCManager): void {
+export function registerIpcHandlers(manager: CCManager, db: DbServices): void {
   registerCcHandlers(manager);
-  // 后续 domain：skill / session / settings / risk-gate 在此注册
+  registerSessionHandlers(db);
+  registerSettingsHandlers(db);
+  registerInstalledSkillHandlers(db);
+  // 后续 domain：skill / risk-gate / pty / installer 在此注册
 }
