@@ -97,16 +97,21 @@ function fingerprintsMatch(a, b) {
 
 function rebuild() {
   console.log("[ensure-electron-abi] ABI fingerprint mismatch → running electron-rebuild -f");
+  // Windows 上 spawn("pnpm") 需要 .cmd 后缀；用 shell:true 让 OS 自己解析。
+  // 参数都是固定字符串无 escape 风险。
   const result = spawnSync(
     "pnpm",
     ["exec", "electron-rebuild", "-f", "-w", "better-sqlite3", "-w", "node-pty"],
     {
       cwd: DESKTOP_DIR,
       stdio: "inherit",
+      shell: process.platform === "win32",
     },
   );
   if (result.status !== 0) {
-    console.error("[ensure-electron-abi] electron-rebuild failed");
+    console.error(
+      `[ensure-electron-abi] electron-rebuild failed (status=${result.status}, signal=${result.signal}, error=${result.error?.message ?? "none"})`,
+    );
     process.exit(result.status ?? 1);
   }
 }
