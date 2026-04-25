@@ -52,7 +52,7 @@ describe("IpcBridgeServer", () => {
 
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "opentrad-bridge-"));
-    socketPath = join(tempDir, "ipc.sock");
+    socketPath = makeTestSocketPath(tempDir, "server");
     const { handlers, calls: c } = fakeHandlers();
     calls = c;
     server = new IpcBridgeServer({ socketPath, handlers, helloTimeoutMs: 1000 });
@@ -189,6 +189,15 @@ describe("IpcBridgeServer", () => {
 });
 
 // ---------- helpers ----------
+
+// 跨平台测试 socket 路径：Unix 用 tempDir/ipc.sock；Windows 用 named pipe
+// （\\.\pipe\<name>，不在文件系统）。production 路径在 db/paths.ts 同款分支。
+function makeTestSocketPath(tempDir: string, label: string): string {
+  if (process.platform === "win32") {
+    return `\\\\.\\pipe\\opentrad-test-${label}-${process.pid}-${Date.now()}`;
+  }
+  return join(tempDir, "ipc.sock");
+}
 
 function connectClient(socketPath: string): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
