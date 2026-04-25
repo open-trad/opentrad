@@ -14,8 +14,10 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { BrowserService } from "@opentrad/browser-tools";
 import { z } from "zod";
 import { IpcBridgeClient } from "./ipc-bridge";
+import { MockRiskGate, type RiskGate } from "./risk-gate";
 import { getToolByName, tools } from "./tools";
 
 async function main(): Promise<void> {
@@ -39,6 +41,14 @@ async function main(): Promise<void> {
   });
   void bridge.connect();
 
+  // BrowserService(M1 #27):懒加载 Chromium,首次 browser_open 时才启。
+  // dev 模式 chromium binary 在 ~/Library/Caches/ms-playwright/(发起人首次跑 setup);
+  // packaged 模式 PLAYWRIGHT_BROWSERS_PATH env 由 desktop 主进程注入(M1 #30)。
+  const browserService = new BrowserService({ launchOptions: { headless: false } });
+
+  // RiskGate(M1 #27 用 MockRiskGate allow 所有,M1 #28 替换为 IpcRiskGate 走 bridge 弹窗)
+  const riskGate: RiskGate = new MockRiskGate();
+
   const server = new Server(
     { name: "opentrad", version: "0.0.0" },
     { capabilities: { tools: {} } },
@@ -60,10 +70,39 @@ async function main(): Promise<void> {
         content: [{ type: "text", text: `unknown tool: ${req.params.name}` }],
       };
     }
+
+    // RiskGate 拦截(M1 #27 落地点):review 走 RiskGate.requestApproval,blocked 直拒。
+    // safe 直接执行,与 #25 / #26 行为一致。
+    if (tool.riskLevel === "blocked") {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `tool ${tool.name} is blocked by risk policy` }],
+      };
+    }
+    if (tool.riskLevel === "review") {
+      const decision = await riskGate.requestApproval({
+        sessionId,
+        toolName: tool.name,
+        params: req.params.arguments,
+      });
+      if (!decision.allowed) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `user denied ${tool.name}${decision.reason ? `: ${decision.reason}` : ""}`,
+            },
+          ],
+        };
+      }
+    }
+
     try {
       const content = await tool.execute(req.params.arguments ?? {}, {
         bridge,
         sessionId,
+        browserService,
       });
       return { content };
     } catch (err) {
@@ -77,6 +116,7 @@ async function main(): Promise<void> {
 
   // 退出清理：CC 关闭 stdio 时 SDK 会触发；这里再加一道 cleanup 保险
   const shutdown = (): void => {
+    void browserService.cleanup().catch(() => {});
     bridge.close();
     process.exit(0);
   };

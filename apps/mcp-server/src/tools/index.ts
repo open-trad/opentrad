@@ -7,6 +7,7 @@
 //          走 IPC bridge）
 //   - #27：browser_open / browser_read / browser_screenshot（review-level）
 
+import type { BrowserService } from "@opentrad/browser-tools";
 import type { z } from "zod";
 import type { IpcBridgeClient } from "../ipc-bridge";
 
@@ -14,10 +15,15 @@ import type { IpcBridgeClient } from "../ipc-bridge";
 export interface ToolContext {
   bridge: IpcBridgeClient;
   sessionId: string;
+  // 可选:browser_* 工具需要;safe / draft 类工具忽略。
+  // mcp-server index.ts 启动时单例创建,所有 browser tool 共享。
+  browserService?: BrowserService;
 }
 
-// MCP 协议返回的 content。M1 只用 text；后续 M1 #27 browser_screenshot 加 image。
-export type ToolContent = { type: "text"; text: string };
+// MCP 协议返回的 content。M1 #27 起 browser_screenshot 加 image 类型(base64 PNG)。
+export type ToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
 
 export interface OpenTradTool {
   name: string;
@@ -30,6 +36,9 @@ export interface OpenTradTool {
 }
 
 // 工具集合：新增工具时 import + 加进数组。
+import { browserOpenTool } from "./browser/open";
+import { browserReadTool } from "./browser/read";
+import { browserScreenshotTool } from "./browser/screenshot";
 import { draftSaveTool } from "./draft-save";
 import { echoTool } from "./echo";
 import { hsCodeLookupTool } from "./hs-code-lookup";
@@ -40,6 +49,9 @@ export const tools: OpenTradTool[] = [
   draftSaveTool,
   hsCodeLookupTool,
   sessionGetMetadataTool,
+  browserOpenTool,
+  browserReadTool,
+  browserScreenshotTool,
 ];
 
 export function getToolByName(name: string): OpenTradTool | undefined {
