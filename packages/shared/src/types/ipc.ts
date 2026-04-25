@@ -1,35 +1,14 @@
 // Electron Main ↔ Renderer IPC 协议。对应 03-architecture.md §3。
 // 原则：Renderer 永不直接 spawn CC，只通过 IPC 请求；Main 负责全部子进程管理。
+//
+// IpcChannels / IpcChannel 已拆到 ../channels.ts（纯 const，不 import zod）。
+// preload 必须从 "@opentrad/shared/channels" 子路径 import，避免触发 zod
+// evaluation chain（详见 channels.ts 的 module-level 注释）。
+// 本文件保留 zod schemas 用于 main 进程的 IPC handler 校验。
 
 import { z } from "zod";
 
-// -------- Channel 名常量（避免字符串硬编码） --------
-
-export const IpcChannels = {
-  CCStartTask: "cc:start-task",
-  CCCancelTask: "cc:cancel-task",
-  CCEvent: "cc:event",
-  CCStatus: "cc:status",
-  SkillList: "skill:list",
-  SkillInstall: "skill:install",
-  SessionList: "session:list",
-  SessionGet: "session:get",
-  SessionDelete: "session:delete",
-  SessionResume: "session:resume",
-  InstalledSkillList: "installed-skill:list",
-  RiskGateConfirm: "risk-gate:confirm",
-  RiskGateResponse: "risk-gate:response",
-  SettingsGet: "settings:get",
-  SettingsSet: "settings:set",
-  PtySpawn: "pty:spawn",
-  PtyWrite: "pty:write",
-  PtyResize: "pty:resize",
-  PtyKill: "pty:kill",
-  PtyData: "pty:data",
-  PtyExit: "pty:exit",
-} as const;
-
-export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];
+export { type IpcChannel, IpcChannels } from "../channels";
 
 // -------- cc:start-task（Renderer → Main） --------
 // Renderer 提供 skillId 和表单填值，Main 内部 compose prompt / 生成 mcp-config / 派 sessionId。

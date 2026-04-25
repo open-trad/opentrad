@@ -5,6 +5,13 @@
 // - 可用：contextBridge、ipcRenderer（Electron 白名单）
 // - 不可用：任意 require、fs、child_process 等 Node API
 // 这是 03-architecture.md §9 安全边界的一部分。
+//
+// **重要：本文件只允许从 "@opentrad/shared/channels" 拿运行时常量**。
+// 从 "@opentrad/shared" 根 export 拿任何 value 会触发 zod evaluation chain
+// （ipc.ts / db.ts 等模块顶部 import zod），vite 会在 preload bundle 里留
+// require("zod")，sandbox 模式 require 拒绝 → 白屏 bug。
+// type imports 编译时擦除，不影响运行时，从根 export 拿 type 没问题。
+// 详见 packages/shared/src/channels.ts module-level 注释。
 
 import type {
   CCCancelTaskRequest,
@@ -20,7 +27,7 @@ import type {
   PtySpawnResponse,
   PtyWriteRequest,
 } from "@opentrad/shared";
-import { IpcChannels } from "@opentrad/shared";
+import { IpcChannels } from "@opentrad/shared/channels";
 import { contextBridge, ipcRenderer } from "electron";
 
 // 对 renderer 暴露的 API。每个 domain 对应一个子对象。

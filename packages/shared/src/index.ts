@@ -5,6 +5,7 @@
 // - domain 类型（本文件根级 export）：OpenTrad 内部统一消费形态，字段 camelCase
 // - wire 类型（./types/wire/* export，带 Wire 前缀）：CC 原始事件保真，仅 stream-parser 内部使用
 
+export * from "./channels";
 export * from "./types/cc-event";
 export * from "./types/cc-task";
 export * from "./types/db";
