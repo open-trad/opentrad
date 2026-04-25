@@ -1,0 +1,35 @@
+# Fixture skill —— 用于 M1 #26 (open-trad/opentrad#26) 端到端验证 startTask
+# 完整链路 + IPC bridge + 第一波 safe-only tools。
+#
+# 字段齐全（所有 SkillManifestSchema required + optional 都有），#23 (M1 #6)
+# SkillLoader 落地时直接复用本 fixture 验证 manifest 解析路径，#24 (M1 #7)
+# SkillPicker UI 也复用本 fixture 演示。trade-email-writer 真实化在 #30 (M1 #13)。
+
+id: fixture-skill
+title: Fixture Test Skill
+version: 0.1.0
+description: M1 #26 端到端验证 fixture——非业务 skill，触发 mcp__opentrad__echo + draft_save 完整链路
+category: communication
+riskLevel: draft_only
+
+allowedTools:
+  - mcp__opentrad__echo
+  - mcp__opentrad__draft_save
+disallowedTools:
+  - Bash(*)
+  - mcp__*__send*
+
+stopBefore: []
+
+inputs:
+  - name: topic
+    type: text
+    label: 主题
+    placeholder: 例如 "测试草稿"
+    required: true
+    default: "OpenTrad fixture run"
+
+outputs:
+  - draft
+
+promptTemplate: prompt.md

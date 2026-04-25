@@ -23,6 +23,7 @@
     "@xterm/xterm": "^6.0.0",
     "better-sqlite3": "^12.9.0",
     "electron": "^41.3.0",
+    "js-yaml": "^4.1.1",
     "node-pty": "^1.1.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
@@ -31,6 +32,7 @@
   "devDependencies": {
     "@opentrad/shared": "workspace:^",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/js-yaml": "^4.0.9",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
