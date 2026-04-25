@@ -16,7 +16,6 @@
 
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 
 const DESKTOP_DIR = path.resolve(__dirname, "..");
@@ -45,7 +44,9 @@ if (typeof pty.spawn !== "function") {
 console.log("smoke OK: node-pty loaded (N-API, ABI-agnostic)");
 `;
 
-const tempScript = path.join(os.tmpdir(), `opentrad-smoke-${process.pid}.cjs`);
+// 临时脚本必须放在 DESKTOP_DIR 内 —— Electron require 解析从脚本所在目录开始，
+// 必须要能找到 apps/desktop 的 node_modules（含 better-sqlite3 / node-pty 软链）。
+const tempScript = path.join(DESKTOP_DIR, `.smoke-tmp-${process.pid}.cjs`);
 fs.writeFileSync(tempScript, TEST_CODE, "utf-8");
 
 console.log(`[smoke] electron binary: ${ELECTRON_BIN}`);
