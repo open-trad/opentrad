@@ -56,3 +56,6 @@ ehthumbs.db
 # Electron ABI sentinel —— 由 apps/desktop/scripts/ensure-electron-abi.cjs
 # 维护，记录上次 rebuild 后的 binary 指纹，本机状态不进版本控制
 apps/desktop/.electron-abi-sentinel.json
+
+# smoke-electron-dlopen.cjs 异常退出时可能残留的临时脚本
+apps/desktop/.smoke-tmp-*.cjs
