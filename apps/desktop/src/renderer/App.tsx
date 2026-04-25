@@ -1,115 +1,299 @@
-// App 组件 — M0 阶段：通过 IPC 拿 CC 状态并展示。
-// Issue #7 验收点：window.api.cc.status() 能拿到 typed CCStatus，
-// 未装/未登录场景 UI 友好提示。
+// App 组件 — M0 收官（Issue #8）：
+// 用户点"Say Hi"按钮 → main spawn CC → stream-json 事件流渲染 → "完成" 标记。
+// 不做 markdown（M1）、skill 表单（M1）、MCP 工具（M2）、Risk Gate（M2）。
 
-import type { CCStatus } from "@opentrad/shared";
+import type { CCEvent, CCStatus } from "@opentrad/shared";
 import type { ReactElement } from "react";
 import { useEffect, useState } from "react";
 
-type LoadState =
+type CcStatusState =
   | { kind: "loading" }
   | { kind: "ready"; data: CCStatus }
   | { kind: "error"; message: string };
 
-export function App(): ReactElement {
-  const [state, setState] = useState<LoadState>({ kind: "loading" });
+type TaskState =
+  | { kind: "idle" }
+  | { kind: "running"; sessionId: string }
+  | { kind: "finished"; sessionId: string; success: boolean };
 
+export function App(): ReactElement {
+  const [ccStatus, setCcStatus] = useState<CcStatusState>({ kind: "loading" });
+  const [task, setTask] = useState<TaskState>({ kind: "idle" });
+  const [events, setEvents] = useState<CCEvent[]>([]);
+
+  // 加载 CC 状态一次
   useEffect(() => {
     let cancelled = false;
     window.api.cc
       .status()
       .then((data) => {
-        if (!cancelled) setState({ kind: "ready", data });
+        if (!cancelled) setCcStatus({ kind: "ready", data });
       })
       .catch((err: unknown) => {
         if (cancelled) return;
         const message = err instanceof Error ? err.message : String(err);
-        setState({ kind: "error", message });
+        setCcStatus({ kind: "error", message });
       });
     return () => {
       cancelled = true;
     };
   }, []);
 
+  // 订阅 CC 事件流（全局一次）
+  useEffect(() => {
+    const unsubscribe = window.api.cc.onEvent((evt) => {
+      setEvents((prev) => [...prev, evt]);
+      if (evt.type === "result") {
+        setTask((prev) =>
+          prev.kind === "running"
+            ? {
+                kind: "finished",
+                sessionId: prev.sessionId,
+                success: evt.subtype === "success",
+              }
+            : prev,
+        );
+      }
+    });
+    return unsubscribe;
+  }, []);
+
+  const canStart =
+    ccStatus.kind === "ready" &&
+    ccStatus.data.installed &&
+    ccStatus.data.loggedIn === true &&
+    task.kind !== "running";
+
+  const onSayHi = async (): Promise<void> => {
+    setEvents([]);
+    setTask({ kind: "running", sessionId: "pending" });
+    try {
+      const { sessionId } = await window.api.cc.startTask({
+        skillId: "__m0_demo__",
+        inputs: {},
+      });
+      setTask({ kind: "running", sessionId });
+    } catch (err) {
+      console.error("[App] startTask failed", err);
+      setTask({ kind: "idle" });
+    }
+  };
+
   return (
     <div
       style={{
         display: "flex",
         flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
         height: "100vh",
         fontFamily: "system-ui, -apple-system, sans-serif",
         color: "#333",
       }}
     >
-      <h1 style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>OpenTrad</h1>
-      <CcStatusPanel state={state} />
-      <p style={{ color: "#999", fontSize: "0.85rem", marginTop: "2rem" }}>
-        M0 骨架 — Issue #7 IPC 通信
-      </p>
+      <Header ccStatus={ccStatus} task={task} />
+      <div style={{ padding: "0 2rem 1rem", textAlign: "center" }}>
+        <button
+          type="button"
+          onClick={onSayHi}
+          disabled={!canStart}
+          style={{
+            padding: "0.6rem 1.5rem",
+            fontSize: "1rem",
+            borderRadius: 6,
+            border: "none",
+            background: canStart ? "#2563eb" : "#cbd5e1",
+            color: "white",
+            cursor: canStart ? "pointer" : "not-allowed",
+          }}
+        >
+          {task.kind === "running" ? "进行中..." : "Say Hi in Chinese"}
+        </button>
+      </div>
+      <EventList events={events} />
     </div>
   );
 }
 
-function CcStatusPanel({ state }: { state: LoadState }): ReactElement {
+function Header({ ccStatus, task }: { ccStatus: CcStatusState; task: TaskState }): ReactElement {
+  return (
+    <header
+      style={{
+        padding: "1rem 2rem",
+        borderBottom: "1px solid #e5e7eb",
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+      }}
+    >
+      <h1 style={{ fontSize: "1.5rem", margin: 0 }}>OpenTrad</h1>
+      <div style={{ fontSize: "0.85rem" }}>
+        <CcStatusInline state={ccStatus} />
+        {task.kind === "finished" ? (
+          <span
+            style={{
+              marginLeft: "1rem",
+              color: task.success ? "#166534" : "#b91c1c",
+            }}
+          >
+            {task.success ? "✓ 完成" : "× 失败"}
+          </span>
+        ) : null}
+      </div>
+    </header>
+  );
+}
+
+function CcStatusInline({ state }: { state: CcStatusState }): ReactElement {
   if (state.kind === "loading") {
-    return <p style={{ color: "#999" }}>检测 Claude Code...</p>;
+    return <span style={{ color: "#999" }}>检测中...</span>;
   }
   if (state.kind === "error") {
-    return (
-      <div
-        style={{
-          color: "#b91c1c",
-          background: "#fee2e2",
-          padding: "0.75rem 1rem",
-          borderRadius: 6,
-          maxWidth: 420,
-          textAlign: "center",
-        }}
-      >
-        <strong>IPC 调用失败：</strong>
-        {state.message}
-      </div>
-    );
+    return <span style={{ color: "#b91c1c" }}>IPC 错误：{state.message}</span>;
   }
   const s = state.data;
   if (!s.installed) {
+    return <span style={{ color: "#92400e" }}>CC 未安装</span>;
+  }
+  if (!s.loggedIn) {
+    return <span style={{ color: "#92400e" }}>v{s.version} · 未登录</span>;
+  }
+  const methodLabel = s.authMethod === "subscription" ? "订阅" : "API";
+  return (
+    <span style={{ color: "#166534" }}>
+      v{s.version} · {s.email ?? "(?)"}（{methodLabel}）
+    </span>
+  );
+}
+
+function EventList({ events }: { events: CCEvent[] }): ReactElement {
+  if (events.length === 0) {
     return (
       <div
         style={{
-          color: "#92400e",
-          background: "#fef3c7",
-          padding: "0.75rem 1rem",
-          borderRadius: 6,
-          maxWidth: 420,
-          textAlign: "center",
+          flex: 1,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#9ca3af",
         }}
       >
-        未检测到 Claude Code
-        {s.error ? (
-          <div style={{ fontSize: "0.85rem", marginTop: "0.25rem" }}>{s.error}</div>
-        ) : null}
+        点按钮发送 "Say Hi in Chinese" 到 Claude Code
       </div>
     );
   }
-  if (!s.loggedIn) {
-    return (
-      <div style={{ color: "#666", textAlign: "center" }}>
-        <div>Claude Code 已安装（v{s.version}）</div>
-        <div style={{ color: "#92400e", marginTop: "0.25rem" }}>尚未登录</div>
-      </div>
-    );
-  }
-  const methodLabel = s.authMethod === "subscription" ? "Claude 订阅" : "API key";
   return (
-    <div style={{ color: "#166534", textAlign: "center" }}>
-      <div>
-        已登录 <code>{s.email ?? "(unknown)"}</code>（{methodLabel}）
-      </div>
-      <div style={{ color: "#666", fontSize: "0.85rem", marginTop: "0.25rem" }}>
-        Claude Code v{s.version}
-      </div>
+    <div style={{ flex: 1, overflowY: "auto", padding: "0 2rem 2rem" }}>
+      {events.map((evt, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: event list is append-only, order is stable
+        <EventCard key={`${i}-${evt.type}`} evt={evt} />
+      ))}
+    </div>
+  );
+}
+
+function EventCard({ evt }: { evt: CCEvent }): ReactElement {
+  switch (evt.type) {
+    case "system":
+      return (
+        <Card tone="neutral">
+          <strong>system/init</strong>
+          <div style={{ fontSize: "0.8rem", color: "#666" }}>
+            model={evt.data.model} · cc={evt.data.claudeCodeVersion}
+          </div>
+        </Card>
+      );
+    case "rate_limit_event":
+      return (
+        <Card tone="warning">
+          <strong>rate limit</strong>
+          <div style={{ fontSize: "0.8rem" }}>
+            type={evt.rateLimitInfo.rateLimitType} · status={evt.rateLimitInfo.status}
+          </div>
+        </Card>
+      );
+    case "assistant_thinking":
+      return (
+        <Card tone="thinking">
+          <details>
+            <summary style={{ cursor: "pointer", color: "#64748b" }}>思考过程</summary>
+            <div style={{ whiteSpace: "pre-wrap", fontSize: "0.85rem", marginTop: "0.5rem" }}>
+              {evt.thinking}
+            </div>
+          </details>
+        </Card>
+      );
+    case "assistant_text":
+      return (
+        <Card tone="assistant">
+          <div style={{ whiteSpace: "pre-wrap" }}>{evt.text}</div>
+        </Card>
+      );
+    case "assistant_tool_use":
+      return (
+        <Card tone="tool">
+          <strong>工具调用：{evt.name}</strong>
+          <pre style={{ fontSize: "0.75rem", margin: "0.25rem 0 0", overflow: "auto" }}>
+            {JSON.stringify(evt.input, null, 2)}
+          </pre>
+        </Card>
+      );
+    case "tool_result":
+      return (
+        <Card tone="tool">
+          <strong>工具结果</strong>
+          <pre style={{ fontSize: "0.75rem", margin: "0.25rem 0 0", overflow: "auto" }}>
+            {JSON.stringify(evt.content, null, 2)}
+          </pre>
+        </Card>
+      );
+    case "result":
+      return (
+        <Card tone={evt.subtype === "success" ? "success" : "error"}>
+          <strong>{evt.subtype === "success" ? "✓ 任务完成" : "× 任务失败"}</strong>
+          <div style={{ fontSize: "0.8rem", color: "#666" }}>
+            duration={evt.data.durationMs}ms · cost=${evt.data.totalCostUsd.toFixed(6)}
+          </div>
+        </Card>
+      );
+    case "unknown":
+      return (
+        <Card tone="neutral">
+          <strong>unknown event</strong>
+          <pre style={{ fontSize: "0.75rem", margin: "0.25rem 0 0", overflow: "auto" }}>
+            {JSON.stringify(evt.raw, null, 2)}
+          </pre>
+        </Card>
+      );
+  }
+}
+
+function Card({
+  tone,
+  children,
+}: {
+  tone: "neutral" | "warning" | "thinking" | "assistant" | "tool" | "success" | "error";
+  children: React.ReactNode;
+}): ReactElement {
+  const palette: Record<typeof tone, { bg: string; border: string }> = {
+    neutral: { bg: "#f3f4f6", border: "#e5e7eb" },
+    warning: { bg: "#fef3c7", border: "#fde68a" },
+    thinking: { bg: "#f1f5f9", border: "#e2e8f0" },
+    assistant: { bg: "#e0f2fe", border: "#bae6fd" },
+    tool: { bg: "#ede9fe", border: "#ddd6fe" },
+    success: { bg: "#dcfce7", border: "#bbf7d0" },
+    error: { bg: "#fee2e2", border: "#fecaca" },
+  };
+  const c = palette[tone];
+  return (
+    <div
+      style={{
+        background: c.bg,
+        border: `1px solid ${c.border}`,
+        borderRadius: 6,
+        padding: "0.75rem 1rem",
+        margin: "0.5rem 0",
+      }}
+    >
+      {children}
     </div>
   );
 }
