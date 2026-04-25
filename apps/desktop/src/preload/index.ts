@@ -19,6 +19,8 @@ import type {
   CCStartTaskRequest,
   CCStartTaskResponse,
   CCStatus,
+  InstallerRunCcInstallResponse,
+  InstallerSupportsAutoInstallResponse,
   PtyDataEvent,
   PtyExitEvent,
   PtyKillRequest,
@@ -50,6 +52,27 @@ const api = {
         ipcRenderer.removeListener(IpcChannels.CCEvent, listener);
       };
     },
+    onStatus(handler: (status: CCStatus) => void): () => void {
+      const listener = (_event: unknown, status: CCStatus): void => handler(status);
+      ipcRenderer.on(IpcChannels.CCStatus, listener);
+      return () => {
+        ipcRenderer.removeListener(IpcChannels.CCStatus, listener);
+      };
+    },
+    detectLoopStart(req: { intervalMs?: number; maxDurationMs?: number } = {}): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.CCDetectLoopStart, req);
+    },
+    detectLoopStop(): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.CCDetectLoopStop);
+    },
+  },
+  installer: {
+    supportsAutoInstall(): Promise<InstallerSupportsAutoInstallResponse> {
+      return ipcRenderer.invoke(IpcChannels.InstallerSupportsAutoInstall);
+    },
+    runCcInstall(): Promise<InstallerRunCcInstallResponse> {
+      return ipcRenderer.invoke(IpcChannels.InstallerRunCcInstall);
+    },
   },
   pty: {
     spawn(req: PtySpawnRequest): Promise<PtySpawnResponse> {
@@ -79,7 +102,15 @@ const api = {
       };
     },
   },
-  // skill / session / settings / risk-gate 后续补
+  settings: {
+    get(key: string): Promise<unknown> {
+      return ipcRenderer.invoke(IpcChannels.SettingsGet, { key });
+    },
+    set(key: string, value: unknown): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.SettingsSet, { key, value });
+    },
+  },
+  // skill / session / risk-gate 后续补
 } as const;
 
 export type OpenTradApi = typeof api;

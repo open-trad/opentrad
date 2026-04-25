@@ -41,6 +41,10 @@ export const IpcChannels = {
   PtyKill: "pty:kill",
   PtyData: "pty:data",
   PtyExit: "pty:exit",
+  InstallerRunCcInstall: "installer:run-cc-install",
+  InstallerSupportsAutoInstall: "installer:supports-auto-install",
+  CCDetectLoopStart: "cc:detect-loop-start",
+  CCDetectLoopStop: "cc:detect-loop-stop",
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];

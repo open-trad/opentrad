@@ -2,11 +2,13 @@
 // 新增 domain 时在此 register 进来。
 
 import type { CCManager } from "@opentrad/cc-adapter";
+import type { DetectLoopRegistry } from "../services/cc-detect-loop";
 import type { DbServices } from "../services/db";
 import type { McpConfigWriter } from "../services/mcp-writer";
 import type { PtyManager } from "../services/pty-manager";
 import { registerCcHandlers } from "./cc";
 import { registerInstalledSkillHandlers } from "./installed-skill";
+import { registerInstallerHandlers } from "./installer";
 import { registerPtyHandlers } from "./pty";
 import { registerSessionHandlers } from "./session";
 import { registerSettingsHandlers } from "./settings";
@@ -16,6 +18,7 @@ export interface IpcDeps {
   db: DbServices;
   pty: PtyManager;
   mcpWriter: McpConfigWriter;
+  detectLoop: DetectLoopRegistry;
 }
 
 export function registerIpcHandlers(deps: IpcDeps): void {
@@ -24,5 +27,6 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   registerSettingsHandlers(deps.db);
   registerInstalledSkillHandlers(deps.db);
   registerPtyHandlers(deps.pty);
-  // 后续 domain：skill / risk-gate / installer 在此注册
+  registerInstallerHandlers({ pty: deps.pty, detectLoop: deps.detectLoop });
+  // 后续 domain：skill / risk-gate 在此注册
 }

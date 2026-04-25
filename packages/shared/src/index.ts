@@ -9,6 +9,7 @@ export * from "./channels";
 export * from "./types/cc-event";
 export * from "./types/cc-task";
 export * from "./types/db";
+export * from "./types/installer";
 export * from "./types/ipc";
 export * from "./types/ipc-bridge";
 export * from "./types/pty";
