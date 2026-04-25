@@ -1,7 +1,11 @@
-// wire → domain 显式映射（按发起人 D1=B' / D6=X / D6a 拍板）。
+// wire → domain 显式映射（按发起人 D1=B' / D6=X / D6a 拍板 / D6 后续修订）。
 // 输入 wire 层 schema 化后的 WireCCEvent，产出 0-N 个 domain CCEvent：
 // - system/rate_limit/result：1→1 直接字段改名 + 挑选
 // - assistant：1→N 按 content block 扁平化，metadata 挂最后一个事件（isLast=true）
+//
+// **per-wire-event 语义（重要）**：CC 2.1.119 实测每个 content block 是独立 wire assistant event，
+// 所以 1→N 中 N 通常 = 1。isLast=true 的语义是"本 wire event 内最后一个 block"，
+// **不是**"整条逻辑消息说完"。消费方判断详见 packages/stream-parser/README.md 的 Consumer guide。
 //
 // 设计不变量：
 // - 每个 domain 事件都带 msgId / seq / sessionId / uuid（D6e）
@@ -76,6 +80,7 @@ function normalizeUsage(wire: WireUsage): Usage {
 
 // 1 个 wire assistant event → N 个 domain events（按 content block 数量）。
 // metadata 挂最后一个 event 的 messageMeta 字段，isLast=true。
+// per-wire-event 语义说明见模块顶部注释 + README Consumer guide。
 function* normalizeAssistant(wire: WireAssistantEvent): Generator<CCEvent> {
   const blocks = wire.message.content;
   const msgId = wire.message.id;

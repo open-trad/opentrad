@@ -1,8 +1,12 @@
 // CC stream-json 事件的 domain 层：OpenTrad 内部统一消费形态。
-// 设计原则（按发起人拍板 D1 = 方案 B'、D6 = 方案 X + D6a 修正）：
+// 设计原则（按发起人拍板 D1 = 方案 B'、D6 = 方案 X + D6a 修正、D6 后续修订）：
 // - 字段统一 camelCase
 // - assistant event 扁平化为 assistant_text / assistant_thinking / assistant_tool_use 独立变体
-// - 同一逻辑消息的多个 domain 事件用 msgId + seq 关联；最后一个带 isLast=true + messageMeta
+// - 同一 wire assistant event 内多个 block 用 msgId + seq 关联；最后一个 block 带 isLast=true + messageMeta
+// - **per-wire-event 语义（重要）**：CC 2.1.119 实测每个 content block 是独立 wire assistant event，
+//   因此 isLast=true 表示"本 wire event 的最后一个 block"，**不**等同"整条逻辑消息说完"。
+//   消费方判断"消息真说完"应观察 tool_result / result / 下一个 user turn 三个锚点；
+//   完整 Consumer guide 见 packages/stream-parser/README.md。
 // - 不泄漏 wire 层字段（snake_case、Anthropic API message 包裹结构等）
 // stream-parser 的 normalize 函数负责 wire → domain 映射（含 1→N 扁平化）。
 
@@ -19,7 +23,12 @@ export const UsageSchema = z.object({
 });
 export type Usage = z.infer<typeof UsageSchema>;
 
-// per-message 元数据，挂在同一 msgId 的最后一个 domain 事件上（D6a）。
+// per-message 元数据：model / usage / stopReason。
+// 挂在同一 wire assistant event 内最后一个 block 对应的 domain 事件上（D6a + 后续修订）。
+// **per-wire-event 语义**：CC 2.1.119 实测每个 content block 一个独立 wire event，
+// 因此 messageMeta 实际是"per wire event 快照"——usage / stopReason 反映的是
+// 这个 wire event 截至此刻的 message-level 累计状态。整条消息真说完的判断详见
+// packages/stream-parser/README.md 的 Consumer guide。
 export const MessageMetaSchema = z.object({
   model: z.string(),
   usage: UsageSchema,
@@ -99,7 +108,11 @@ export const AssistantTextEventSchema = z.object({
   seq: z.number().int(),
   sessionId: z.string(),
   uuid: z.string(),
+  // per-wire-event 语义：本 wire event 内最后一个 block 时 true。
+  // 不等同"整条消息说完"——同 msgId 的下一个 wire event 到达前不可信。
+  // 消费方判断详见 stream-parser/README.md Consumer guide。
   isLast: z.boolean(),
+  // 仅当 isLast=true 时存在；per-wire-event 快照（不是整条消息终态）。
   messageMeta: MessageMetaSchema.optional(),
   text: z.string(),
 });
@@ -111,7 +124,9 @@ export const AssistantThinkingEventSchema = z.object({
   seq: z.number().int(),
   sessionId: z.string(),
   uuid: z.string(),
+  // per-wire-event 语义：本 wire event 内最后一个 block 时 true。详见 README Consumer guide。
   isLast: z.boolean(),
+  // 仅当 isLast=true 时存在；per-wire-event 快照。
   messageMeta: MessageMetaSchema.optional(),
   thinking: z.string(),
   signature: z.string(),
@@ -124,7 +139,9 @@ export const AssistantToolUseEventSchema = z.object({
   seq: z.number().int(),
   sessionId: z.string(),
   uuid: z.string(),
+  // per-wire-event 语义：本 wire event 内最后一个 block 时 true。详见 README Consumer guide。
   isLast: z.boolean(),
+  // 仅当 isLast=true 时存在；per-wire-event 快照。
   messageMeta: MessageMetaSchema.optional(),
   toolUseId: z.string(),
   name: z.string(),
