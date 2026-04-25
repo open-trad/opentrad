@@ -52,10 +52,14 @@ const result = spawnSync(ELECTRON_BIN, ["-e", TEST_CODE], {
   cwd: DESKTOP_DIR,
   env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
   stdio: "inherit",
+  // Windows 上 spawn .cmd 需要 shell:true（pnpm exec / node spawn 同款问题）
+  shell: process.platform === "win32",
 });
 
 if (result.status !== 0) {
-  console.error(`[smoke] FAIL: exit code ${result.status}`);
+  console.error(
+    `[smoke] FAIL: exit code ${result.status}, signal=${result.signal}, error=${result.error?.message ?? "none"}`,
+  );
   process.exit(result.status ?? 1);
 }
 console.log("[smoke] PASS");
