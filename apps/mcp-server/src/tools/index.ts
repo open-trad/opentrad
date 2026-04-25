@@ -1,8 +1,11 @@
-// Tool 注册框架（M1 #25）。OpenTradTool 接口扩展 MCP SDK 标准 Tool 定义，
+// Tool 注册框架（M1 #25 起）。OpenTradTool 接口扩展 MCP SDK 标准 Tool 定义，
 // 加 OpenTrad 自己的 riskLevel + category 元数据。
 //
-// M1 范围：仅 echo（safe 类）。后续 M1 #26 加 draft_save / hs_code_lookup /
-// session_get_metadata；M1 #27 加 browser_open / browser_read / browser_screenshot。
+// M1 工具落地节奏：
+//   - #25：echo（safe，验证 stdio MCP 链路）
+//   - #26：draft_save / hs_code_lookup / session_get_metadata（safe-only,
+//          走 IPC bridge）
+//   - #27：browser_open / browser_read / browser_screenshot（review-level）
 
 import type { z } from "zod";
 import type { IpcBridgeClient } from "../ipc-bridge";
@@ -26,10 +29,18 @@ export interface OpenTradTool {
   execute(input: unknown, ctx: ToolContext): Promise<ToolContent[]>;
 }
 
-// 工具集合：M1 仅 echo。新增工具时 import + 加进数组。
+// 工具集合：新增工具时 import + 加进数组。
+import { draftSaveTool } from "./draft-save";
 import { echoTool } from "./echo";
+import { hsCodeLookupTool } from "./hs-code-lookup";
+import { sessionGetMetadataTool } from "./session-get-metadata";
 
-export const tools: OpenTradTool[] = [echoTool];
+export const tools: OpenTradTool[] = [
+  echoTool,
+  draftSaveTool,
+  hsCodeLookupTool,
+  sessionGetMetadataTool,
+];
 
 export function getToolByName(name: string): OpenTradTool | undefined {
   return tools.find((t) => t.name === name);

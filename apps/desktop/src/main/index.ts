@@ -11,6 +11,7 @@ import { createDbServices, type DbServices, getIpcSocketPath } from "./services/
 import { createIpcBridgeHandlers } from "./services/ipc-bridge-handlers";
 import { IpcBridgeServer } from "./services/ipc-bridge-server";
 import { type AppLock, AppLockHeldError, acquireAppLock } from "./services/lock";
+import { McpConfigWriter } from "./services/mcp-writer";
 import { PtyManager } from "./services/pty-manager";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -20,6 +21,15 @@ const ccManager = new CCManager();
 
 // 全局 PtyManager 单例：跨窗口共享，路由由 IPC handler 内部 ptyId → webContents 管理。
 const ptyManager = new PtyManager();
+
+// McpConfigWriter（M1 #26）：每次 startTask 生成临时 mcp-config，让 CC 通过 stdio
+// 拉起 apps/mcp-server。dev 用 tsx 跑 .ts 入口；electron-builder 打包路径在 M1 #13。
+// REPO_ROOT 从 main/index.ts 文件位置回溯：apps/desktop/src/main → 上 4 层。
+const REPO_ROOT = join(__dirname, "..", "..", "..", "..");
+const mcpWriter = new McpConfigWriter({
+  mcpServerCommand: join(REPO_ROOT, "node_modules", ".bin", "tsx"),
+  mcpServerArgs: [join(REPO_ROOT, "apps", "mcp-server", "src", "index.ts")],
+});
 
 // 启动时初始化、退出时释放：lock + db + ipc-bridge server。
 let appLock: AppLock | undefined;
@@ -85,7 +95,12 @@ app.whenReady().then(() => {
     console.error("[main] IPC bridge server start failed", err);
   });
 
-  registerIpcHandlers(ccManager, dbServices, ptyManager);
+  registerIpcHandlers({
+    manager: ccManager,
+    db: dbServices,
+    pty: ptyManager,
+    mcpWriter,
+  });
   createMainWindow();
 
   // macOS 点 dock icon 重启窗口（Electron 推荐行为）
