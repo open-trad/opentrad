@@ -21,6 +21,12 @@ export const IpcChannels = {
   RiskGateResponse: "risk-gate:response",
   SettingsGet: "settings:get",
   SettingsSet: "settings:set",
+  PtySpawn: "pty:spawn",
+  PtyWrite: "pty:write",
+  PtyResize: "pty:resize",
+  PtyKill: "pty:kill",
+  PtyData: "pty:data",
+  PtyExit: "pty:exit",
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];

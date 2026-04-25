@@ -12,6 +12,13 @@ import type {
   CCStartTaskRequest,
   CCStartTaskResponse,
   CCStatus,
+  PtyDataEvent,
+  PtyExitEvent,
+  PtyKillRequest,
+  PtyResizeRequest,
+  PtySpawnRequest,
+  PtySpawnResponse,
+  PtyWriteRequest,
 } from "@opentrad/shared";
 import { IpcChannels } from "@opentrad/shared";
 import { contextBridge, ipcRenderer } from "electron";
@@ -34,6 +41,34 @@ const api = {
       ipcRenderer.on(IpcChannels.CCEvent, listener);
       return () => {
         ipcRenderer.removeListener(IpcChannels.CCEvent, listener);
+      };
+    },
+  },
+  pty: {
+    spawn(req: PtySpawnRequest): Promise<PtySpawnResponse> {
+      return ipcRenderer.invoke(IpcChannels.PtySpawn, req);
+    },
+    write(req: PtyWriteRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.PtyWrite, req);
+    },
+    resize(req: PtyResizeRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.PtyResize, req);
+    },
+    kill(req: PtyKillRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.PtyKill, req);
+    },
+    onData(handler: (evt: PtyDataEvent) => void): () => void {
+      const listener = (_event: unknown, evt: PtyDataEvent): void => handler(evt);
+      ipcRenderer.on(IpcChannels.PtyData, listener);
+      return () => {
+        ipcRenderer.removeListener(IpcChannels.PtyData, listener);
+      };
+    },
+    onExit(handler: (evt: PtyExitEvent) => void): () => void {
+      const listener = (_event: unknown, evt: PtyExitEvent): void => handler(evt);
+      ipcRenderer.on(IpcChannels.PtyExit, listener);
+      return () => {
+        ipcRenderer.removeListener(IpcChannels.PtyExit, listener);
       };
     },
   },
