@@ -5,6 +5,7 @@
 import type { CCEvent, CCStatus } from "@opentrad/shared";
 import type { ReactElement } from "react";
 import { useEffect, useState } from "react";
+import { TerminalPane } from "./components/ui/TerminalPane";
 
 type CcStatusState =
   | { kind: "loading" }
@@ -20,6 +21,8 @@ export function App(): ReactElement {
   const [ccStatus, setCcStatus] = useState<CcStatusState>({ kind: "loading" });
   const [task, setTask] = useState<TaskState>({ kind: "idle" });
   const [events, setEvents] = useState<CCEvent[]>([]);
+  // M1 #20：PTY 面板默认折叠（02 F1.4 + issue 验收）
+  const [ptyOpen, setPtyOpen] = useState(false);
 
   // 加载 CC 状态一次
   useEffect(() => {
@@ -109,6 +112,34 @@ export function App(): ReactElement {
         </button>
       </div>
       <EventList events={events} />
+      <PtyDrawer open={ptyOpen} onToggle={() => setPtyOpen((v) => !v)} />
+    </div>
+  );
+}
+
+// 底部折叠 Terminal 面板（M1 #20）。默认折叠，点"打开 terminal"才挂载 TerminalPane
+// （挂载时才 spawn PTY；折叠回去会 unmount TerminalPane → kill PTY，避免后台 shell 长留）。
+function PtyDrawer({ open, onToggle }: { open: boolean; onToggle: () => void }): ReactElement {
+  return (
+    <div style={{ borderTop: "1px solid #e5e7eb" }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        style={{
+          width: "100%",
+          padding: "0.4rem 1rem",
+          textAlign: "left",
+          background: "#f8fafc",
+          border: "none",
+          borderBottom: open ? "1px solid #e5e7eb" : "none",
+          cursor: "pointer",
+          fontSize: "0.85rem",
+          color: "#475569",
+        }}
+      >
+        {open ? "▼ 关闭 terminal" : "▶ 打开 terminal"}
+      </button>
+      {open ? <TerminalPane height={280} /> : null}
     </div>
   );
 }

@@ -21,7 +21,8 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "typecheck": "pnpm -r --if-present typecheck && tsc -p scripts/tsconfig.json --noEmit",
-    "test": "pnpm -r --if-present test"
+    "test": "pnpm -r --if-present test",
+    "postinstall": "node scripts/fix-node-pty-perms.cjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
@@ -49,7 +50,8 @@
       "electron",
       "esbuild",
       "@biomejs/biome",
-      "better-sqlite3"
+      "better-sqlite3",
+      "node-pty"
     ]
   }
 }

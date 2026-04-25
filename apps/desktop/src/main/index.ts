@@ -9,11 +9,15 @@ import { app, BrowserWindow, dialog } from "electron";
 import { registerIpcHandlers } from "./ipc";
 import { createDbServices, type DbServices } from "./services/db";
 import { type AppLock, AppLockHeldError, acquireAppLock } from "./services/lock";
+import { PtyManager } from "./services/pty-manager";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // 全局 CCManager 单例：所有 IPC handler 共享同一个 manager 以维持 activeTasks map。
 const ccManager = new CCManager();
+
+// 全局 PtyManager 单例：跨窗口共享，路由由 IPC handler 内部 ptyId → webContents 管理。
+const ptyManager = new PtyManager();
 
 // 启动时初始化、退出时释放：lock + db。
 let appLock: AppLock | undefined;
@@ -67,7 +71,7 @@ app.whenReady().then(() => {
   // SQLite 初始化（M1 #19 验收 1）：~/.opentrad/opentrad.db 自动建表。
   dbServices = createDbServices();
 
-  registerIpcHandlers(ccManager, dbServices);
+  registerIpcHandlers(ccManager, dbServices, ptyManager);
   createMainWindow();
 
   // macOS 点 dock icon 重启窗口（Electron 推荐行为）
@@ -99,6 +103,11 @@ app.on("before-quit", async (event) => {
 });
 
 function finalizeShutdown(): void {
+  try {
+    ptyManager.cleanup();
+  } catch (err) {
+    console.error("[main] pty cleanup error", err);
+  }
   try {
     dbServices?.close();
   } catch (err) {
