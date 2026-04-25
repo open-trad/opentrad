@@ -12,13 +12,42 @@
 // 这里坚持 stub != mock，full-fidelity fixture。
 
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { type SkillManifest, SkillManifestSchema } from "@opentrad/shared";
 import * as yaml from "js-yaml";
 
-// fixture 仓库内绝对路径。从 desktop 的 dist 跑时通过相对 monorepo 解析。
-const REPO_ROOT = join(__dirname, "..", "..", "..", "..", "..");
-const FIXTURE_DIR = join(REPO_ROOT, "packages", "skill-runtime", "__fixtures__");
+// fixture 路径解析:dev / packaged / vitest 三种环境路径深度不同。
+//
+// - vitest:跑 src/main/services/skill-fixture-loader.ts,__dirname 是源码目录,
+//   5 层 ".." 上溯到 monorepo root。
+// - electron(dev / packaged):main bundle 到 apps/desktop/out/main/index.js,
+//   __dirname 路径深度变化,5 层 ".." 会跑到错误目录(M1 #21 dev 验证 bug A)。
+//   改用 electron app.getAppPath()(返回 apps/desktop),上 2 层到 monorepo root。
+//
+// 探测靠 process.versions.electron(electron 进程独有);vitest 走 fallback。
+// createRequire 同步加载 electron(模块顶层用 dynamic import 不行,本函数同步)。
+//
+// **#23 (M1 #6) SkillLoader 落地后本文件删除**,届时 packaged 走 ~/.opentrad/skills/,
+// 此 path 解析也随之退场。
+function resolveFixtureDir(): string {
+  if (process.versions?.electron) {
+    const requireFromHere = createRequire(import.meta.url);
+    const electron = requireFromHere("electron") as { app: { getAppPath: () => string } };
+    // app.getAppPath() = apps/desktop;monorepo root 是上 2 层
+    return join(electron.app.getAppPath(), "..", "..", "packages", "skill-runtime", "__fixtures__");
+  }
+  // vitest fallback:src/main/services → 5 ".." → monorepo root
+  return join(__dirname, "..", "..", "..", "..", "..", "packages", "skill-runtime", "__fixtures__");
+}
+
+// 模块加载时不解析(electron require 在 vitest import 时不应触发);
+// loadFixtureSkill 调用时再解析,带 cache 避免每次 require。
+let cachedFixtureDir: string | undefined;
+function getFixtureDir(): string {
+  if (!cachedFixtureDir) cachedFixtureDir = resolveFixtureDir();
+  return cachedFixtureDir;
+}
 
 export interface LoadedSkill {
   manifest: SkillManifest;
@@ -26,7 +55,7 @@ export interface LoadedSkill {
 }
 
 export function loadFixtureSkill(skillId: string): LoadedSkill {
-  const skillDir = join(FIXTURE_DIR, skillId);
+  const skillDir = join(getFixtureDir(), skillId);
   const yamlPath = join(skillDir, "skill.yml");
   if (!existsSync(yamlPath)) {
     throw new Error(`fixture skill not found: ${skillId} (looked at ${yamlPath})`);
