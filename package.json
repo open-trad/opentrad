@@ -48,7 +48,8 @@
     "onlyBuiltDependencies": [
       "electron",
       "esbuild",
-      "@biomejs/biome"
+      "@biomejs/biome",
+      "better-sqlite3"
     ]
   }
 }

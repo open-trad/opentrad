@@ -7,16 +7,20 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
-    "start": "electron-vite preview"
+    "start": "electron-vite preview",
+    "test": "vitest run"
   },
   "dependencies": {
     "@opentrad/cc-adapter": "workspace:^",
+    "better-sqlite3": "^12.9.0",
     "electron": "^41.3.0",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react-dom": "^19.2.5",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@opentrad/shared": "workspace:^",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",

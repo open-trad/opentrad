@@ -13,7 +13,10 @@ export const IpcChannels = {
   SkillList: "skill:list",
   SkillInstall: "skill:install",
   SessionList: "session:list",
+  SessionGet: "session:get",
+  SessionDelete: "session:delete",
   SessionResume: "session:resume",
+  InstalledSkillList: "installed-skill:list",
   RiskGateConfirm: "risk-gate:confirm",
   RiskGateResponse: "risk-gate:response",
   SettingsGet: "settings:get",
@@ -90,6 +93,31 @@ export const SessionMetaSchema = z.object({
 });
 
 export type SessionMeta = z.infer<typeof SessionMetaSchema>;
+
+export const SessionListRequestSchema = z.object({
+  limit: z.number().int().positive().default(50),
+  offset: z.number().int().nonnegative().default(0),
+});
+
+export type SessionListRequest = z.infer<typeof SessionListRequestSchema>;
+
+// -------- session:get（Renderer → Main） --------
+// 返回 SessionRow（完整字段；含 lastModel / totalCostUsd / messageCount / ccSessionPath）或 null。
+
+export const SessionGetRequestSchema = z.object({
+  sessionId: z.string(),
+});
+
+export type SessionGetRequest = z.infer<typeof SessionGetRequestSchema>;
+
+// -------- session:delete（Renderer → Main） --------
+// events 通过 FK ON DELETE CASCADE 自动清理。
+
+export const SessionDeleteRequestSchema = z.object({
+  sessionId: z.string(),
+});
+
+export type SessionDeleteRequest = z.infer<typeof SessionDeleteRequestSchema>;
 
 // -------- session:resume（Renderer → Main） --------
 
