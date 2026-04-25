@@ -42,7 +42,45 @@ Skill 是独立的 markdown + yaml 包，贡献到 [open-trad/skills](https://gi
 
 ## 开发指南
 
-（待 M0 骨架完成后补充）
+### 环境要求
+
+- Node.js ≥ 20.18.0
+- pnpm ≥ 10.0.0
+- macOS / Linux / Windows 都支持
+
+### 安装
+
+```bash
+pnpm install
+```
+
+`pnpm install` 自动跑两个 postinstall:
+- `scripts/fix-node-pty-perms.cjs` 给 node-pty 的 spawn-helper 加 +x(prebuild 没设)
+- `apps/desktop` 下 `electron-rebuild` 把 better-sqlite3 / node-pty 重新编译为 Electron 的 ABI
+
+完成后即可 `pnpm dev`,**新机器 / 新贡献者第一次开就能跑**,无需手动 rebuild。
+
+### 常用命令
+
+```bash
+pnpm dev          # 启动 desktop 应用(Electron)
+pnpm test         # 跑全 monorepo 单测
+pnpm typecheck    # 全 monorepo TypeScript 校验
+pnpm lint         # biome check
+pnpm format       # biome format --write
+```
+
+### Electron / Node ABI 切换
+
+`better-sqlite3` 和 `node-pty` 是 native module,Electron 和系统 Node 的 ABI(NODE_MODULE_VERSION)不同,共存需要切换:
+
+| 场景 | 当前 ABI | 切换命令 |
+|---|---|---|
+| `pnpm install` 后默认 | Electron ABI | (无需操作,可直接 `pnpm dev`) |
+| 跑 `pnpm dev` / `pnpm build` | 需要 Electron ABI | `pnpm --filter @opentrad/desktop rebuild:electron` |
+| 跑 `pnpm test` / vitest | 需要 Node ABI | `pnpm --filter @opentrad/desktop rebuild:node` |
+
+**典型报错信号**:加载 `better-sqlite3` 或 `node-pty` 时报 `NODE_MODULE_VERSION X vs Y`,跑对应的 rebuild 命令切换即可。CI fresh checkout 永远是干净状态,不会撞这个坑。
 
 ## 提交规范
 

@@ -41,6 +41,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # apps/desktop 的 postinstall 把 better-sqlite3 / node-pty rebuild 成 Electron ABI
+      # （让 `pnpm dev` 开箱即用，详见 CONTRIBUTING.md）。CI 跑 vitest 时需要的是
+      # 系统 Node ABI，所以在 lint/test 前切回 Node ABI。build:dist（M1 #13）真打包时
+      # 再切回 Electron ABI 即可。
+      - name: Rebuild native modules for Node ABI (vitest)
+        run: pnpm --filter @opentrad/desktop rebuild:node
+
       - name: Lint
         run: pnpm lint
 
