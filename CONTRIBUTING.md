@@ -54,31 +54,48 @@ Skill 是独立的 markdown + yaml 包，贡献到 [open-trad/skills](https://gi
 pnpm install
 ```
 
-`pnpm install` 自动跑两个 postinstall:
-- `scripts/fix-node-pty-perms.cjs` 给 node-pty 的 spawn-helper 加 +x(prebuild 没设)
-- `apps/desktop` 下 `electron-rebuild` 把 better-sqlite3 / node-pty 重新编译为 Electron 的 ABI
-
-完成后即可 `pnpm dev`,**新机器 / 新贡献者第一次开就能跑**,无需手动 rebuild。
-
 ### 常用命令
 
 ```bash
-pnpm dev          # 启动 desktop 应用(Electron)
+pnpm dev          # 启动 desktop 应用(Electron) — predev hook 自动确保 ABI
 pnpm test         # 跑全 monorepo 单测
 pnpm typecheck    # 全 monorepo TypeScript 校验
 pnpm lint         # biome check
 pnpm format       # biome format --write
 ```
 
-### Electron / Node ABI 切换
+### Electron / Node ABI 自动切换(PR A v2 / #36)
 
-`better-sqlite3` 和 `node-pty` 是 native module,Electron 和系统 Node 的 ABI(NODE_MODULE_VERSION)不同,共存需要切换:
+`better-sqlite3` 是经典 ABI-bound native module(`node-pty` 是 N-API,ABI-agnostic)。Electron 41.x 内嵌 `NODE_MODULE_VERSION 145`,系统 Node 是 137,binary 必须跟当前运行环境 ABI 一致才能 dlopen。
 
-| 场景 | 当前 ABI | 切换命令 |
-|---|---|---|
-| `pnpm install` 后默认 | Electron ABI | (无需操作,可直接 `pnpm dev`) |
-| 跑 `pnpm dev` / `pnpm build` | 需要 Electron ABI | `pnpm --filter @opentrad/desktop rebuild:electron` |
-| 跑 `pnpm test` / vitest | 需要 Node ABI | `pnpm --filter @opentrad/desktop rebuild:node` |
+**对开发者的体验**:`pnpm dev` 永远 just works,**不用手动 rebuild**。机制如下:
+
+- `apps/desktop/scripts/ensure-electron-abi.cjs` 是智能 ABI guard:
+  - 读 `apps/desktop/.electron-abi-sentinel.json`(本机状态,gitignored)记录的上次 rebuild 指纹
+  - 对比当前 Electron 版本 / abi / better-sqlite3 binary size
+  - 匹配 → **0 秒退出**(99% 启动)
+  - 不匹配 → spawn `electron-rebuild -f` 真改 binary,写新 sentinel(1-2 秒,1% 启动)
+- 这个脚本被 `predev` / `prebuild` / `postinstall` 三处调用,任何流向 dev/build 的路径都被守住
+
+**vitest 路径(切回 Node ABI)**:跑 `pnpm test` 前如果之前跑过 `pnpm dev`,binary 是 Electron ABI,vitest 加载会报 `NODE_MODULE_VERSION` 错。**手动切回**:
+
+```bash
+pnpm --filter @opentrad/desktop rebuild:node
+```
+
+之后再跑 `pnpm dev`,predev 会再切回 Electron ABI(自动)。
+
+### Smoke test
+
+```bash
+pnpm --filter @opentrad/desktop smoke
+```
+
+模拟 Electron 真 `require("better-sqlite3") + new Database(":memory:")`,catch ABI 错位 / native module 未编译等问题。CI 三平台跑同款 smoke。
+
+### 历史背景
+
+PR A v1(#34) 直接用 `postinstall: electron-rebuild`,但实测 pnpm install 在 monorepo workspace **already-up-to-date 时跳过所有 hook**(`pnpm@10` 行为),且 `electron-rebuild` 不带 `-f` **假成功不动 binary**。两个 bug 叠加导致 hands-off 路径炸。PR A v2(#36)用 sentinel + 多 hook 守 + CI smoke job 治本。详见 [retrospective-m1](https://github.com/open-trad/docs/blob/main/design/retrospective-m1.md)(M1 收官时撰写)。
 
 **典型报错信号**:加载 `better-sqlite3` 或 `node-pty` 时报 `NODE_MODULE_VERSION X vs Y`,跑对应的 rebuild 命令切换即可。CI fresh checkout 永远是干净状态,不会撞这个坑。
 

@@ -41,10 +41,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # apps/desktop 的 postinstall 把 better-sqlite3 / node-pty rebuild 成 Electron ABI
-      # （让 `pnpm dev` 开箱即用，详见 CONTRIBUTING.md）。CI 跑 vitest 时需要的是
-      # 系统 Node ABI，所以在 lint/test 前切回 Node ABI。build:dist（M1 #13）真打包时
-      # 再切回 Electron ABI 即可。
+      # 本 job 跑 vitest，需要 better-sqlite3 / node-pty 是系统 Node ABI。
+      # 实测 pnpm install 在 monorepo workspace already-up-to-date 时跳过所有 hook
+      # （PR A v2 / open-trad/opentrad#36 根因），所以显式 rebuild:node 强制切回。
+      # build:dist（M1 #13）真打包时改用 rebuild:electron 切到 Electron ABI。
       - name: Rebuild native modules for Node ABI (vitest)
         run: pnpm --filter @opentrad/desktop rebuild:node
 
@@ -56,3 +56,43 @@ jobs:
 
       - name: Test
         run: pnpm -r --if-present test
+
+  # PR A v2 / #36：Electron dlopen smoke test（治本于 hands-off 路径回归）。
+  # 主 check job 永远跑系统 Node ABI 的 vitest，不会暴露 Electron ABI 问题。
+  # 这个 job 模拟用户真起 Electron 的代码路径：fresh checkout → pnpm install →
+  # apps/desktop scripts/ensure-electron-abi.cjs（postinstall + 显式调）→ 用
+  # ELECTRON_RUN_AS_NODE=1 让 electron 二进制以 Node 模式 require + new Database。
+  # 不依赖 GUI display / xvfb，三平台一致跑。
+  electron-abi-smoke:
+    name: electron-abi-smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 显式调 ensure-electron-abi（fresh install 时 hook 已经跑过了，这里幂等;
+      # 已 up-to-date 时是真把 binary 切到 Electron ABI 的关键步骤）。
+      - name: Ensure Electron ABI
+        run: node apps/desktop/scripts/ensure-electron-abi.cjs
+
+      - name: Smoke test (Electron dlopen + new Database)
+        run: pnpm --filter @opentrad/desktop smoke
