@@ -6,6 +6,7 @@ import type { DetectLoopRegistry } from "../services/cc-detect-loop";
 import type { DbServices } from "../services/db";
 import type { McpConfigWriter } from "../services/mcp-writer";
 import type { PtyManager } from "../services/pty-manager";
+import { registerAuthHandlers } from "./auth";
 import { registerCcHandlers } from "./cc";
 import { registerInstalledSkillHandlers } from "./installed-skill";
 import { registerInstallerHandlers } from "./installer";
@@ -28,5 +29,6 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   registerInstalledSkillHandlers(deps.db);
   registerPtyHandlers(deps.pty);
   registerInstallerHandlers({ pty: deps.pty, detectLoop: deps.detectLoop });
+  registerAuthHandlers({ pty: deps.pty });
   // 后续 domain：skill / risk-gate 在此注册
 }

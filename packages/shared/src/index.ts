@@ -6,6 +6,7 @@
 // - wire 类型（./types/wire/* export，带 Wire 前缀）：CC 原始事件保真，仅 stream-parser 内部使用
 
 export * from "./channels";
+export * from "./types/auth";
 export * from "./types/cc-event";
 export * from "./types/cc-task";
 export * from "./types/db";

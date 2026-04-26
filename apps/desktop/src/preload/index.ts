@@ -14,6 +14,8 @@
 // 详见 packages/shared/src/channels.ts module-level 注释。
 
 import type {
+  AuthStartLoginFlowRequest,
+  AuthStartLoginFlowResponse,
   CCCancelTaskRequest,
   CCEvent,
   CCStartTaskRequest,
@@ -28,6 +30,7 @@ import type {
   PtySpawnRequest,
   PtySpawnResponse,
   PtyWriteRequest,
+  ShellOpenExternalRequest,
 } from "@opentrad/shared";
 import { IpcChannels } from "@opentrad/shared/channels";
 import { contextBridge, ipcRenderer } from "electron";
@@ -108,6 +111,16 @@ const api = {
     },
     set(key: string, value: unknown): Promise<void> {
       return ipcRenderer.invoke(IpcChannels.SettingsSet, { key, value });
+    },
+  },
+  auth: {
+    startLoginFlow(req: AuthStartLoginFlowRequest): Promise<AuthStartLoginFlowResponse> {
+      return ipcRenderer.invoke(IpcChannels.AuthStartLoginFlow, req);
+    },
+  },
+  shell: {
+    openExternal(req: ShellOpenExternalRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.ShellOpenExternal, req);
     },
   },
   // skill / session / risk-gate 后续补

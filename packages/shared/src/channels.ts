@@ -45,6 +45,8 @@ export const IpcChannels = {
   InstallerSupportsAutoInstall: "installer:supports-auto-install",
   CCDetectLoopStart: "cc:detect-loop-start",
   CCDetectLoopStop: "cc:detect-loop-stop",
+  AuthStartLoginFlow: "auth:start-login-flow",
+  ShellOpenExternal: "shell:open-external",
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];
