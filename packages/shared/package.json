@@ -7,7 +7,7 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./channels": "./src/channels.ts"
+    "./channels": "./src/channels/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
