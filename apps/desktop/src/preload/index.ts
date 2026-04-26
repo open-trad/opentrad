@@ -31,6 +31,7 @@ import type {
   PtySpawnResponse,
   PtyWriteRequest,
   ShellOpenExternalRequest,
+  SkillManifest,
 } from "@opentrad/shared";
 import { IpcChannels } from "@opentrad/shared/channels";
 import { contextBridge, ipcRenderer } from "electron";
@@ -123,7 +124,12 @@ const api = {
       return ipcRenderer.invoke(IpcChannels.ShellOpenExternal, req);
     },
   },
-  // skill / session / risk-gate 后续补
+  skill: {
+    list(): Promise<SkillManifest[]> {
+      return ipcRenderer.invoke(IpcChannels.SkillList);
+    },
+  },
+  // session / risk-gate 后续补
 } as const;
 
 export type OpenTradApi = typeof api;

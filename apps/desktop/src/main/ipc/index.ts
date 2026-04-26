@@ -13,6 +13,7 @@ import { registerInstallerHandlers } from "./installer";
 import { registerPtyHandlers } from "./pty";
 import { registerSessionHandlers } from "./session";
 import { registerSettingsHandlers } from "./settings";
+import { registerSkillHandlers } from "./skill";
 
 export interface IpcDeps {
   manager: CCManager;
@@ -30,5 +31,6 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   registerPtyHandlers(deps.pty);
   registerInstallerHandlers({ pty: deps.pty, detectLoop: deps.detectLoop });
   registerAuthHandlers({ pty: deps.pty });
-  // 后续 domain：skill / risk-gate 在此注册
+  registerSkillHandlers();
+  // 后续 domain：risk-gate 在此注册
 }
