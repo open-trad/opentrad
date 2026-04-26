@@ -12,6 +12,7 @@ import { type ReactElement, useEffect, useState } from "react";
 import { SkillPicker } from "./components/layout/SkillPicker";
 import { TerminalPane } from "./components/ui/TerminalPane";
 import { OnboardingGate } from "./features/onboarding/OnboardingGate";
+import { RiskGateOverlay } from "./features/risk-gate/RiskGateOverlay";
 import { SkillWorkArea } from "./features/skills/SkillWorkArea";
 
 type CcStatusState =
@@ -21,9 +22,14 @@ type CcStatusState =
 
 export function App(): ReactElement {
   return (
-    <OnboardingGate>
-      <MainApp />
-    </OnboardingGate>
+    <>
+      <OnboardingGate>
+        <MainApp />
+      </OnboardingGate>
+      {/* RiskGate 弹窗(M1 #28):全局挂载,不论 onboarding 阶段都能弹(理论上 onboarding
+          阶段不会触发 review tool,但留全局挂载更稳)。订阅 IPC channel risk-gate:confirm */}
+      <RiskGateOverlay />
+    </>
   );
 }
 

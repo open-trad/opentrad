@@ -30,6 +30,8 @@ import type {
   PtySpawnRequest,
   PtySpawnResponse,
   PtyWriteRequest,
+  RiskGateConfirmPayload,
+  RiskGateResponsePayload,
   ShellOpenExternalRequest,
   SkillManifest,
 } from "@opentrad/shared";
@@ -129,7 +131,19 @@ const api = {
       return ipcRenderer.invoke(IpcChannels.SkillList);
     },
   },
-  // session / risk-gate 后续补
+  riskGate: {
+    onConfirm(handler: (payload: RiskGateConfirmPayload) => void): () => void {
+      const listener = (_event: unknown, payload: RiskGateConfirmPayload): void => handler(payload);
+      ipcRenderer.on(IpcChannels.RiskGateConfirm, listener);
+      return () => {
+        ipcRenderer.removeListener(IpcChannels.RiskGateConfirm, listener);
+      };
+    },
+    sendResponse(payload: RiskGateResponsePayload): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.RiskGateResponse, payload);
+    },
+  },
+  // session 后续补
 } as const;
 
 export type OpenTradApi = typeof api;
