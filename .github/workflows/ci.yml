@@ -14,6 +14,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# 全局 env：CI 不需要 Playwright Chromium binary(单测全 mock,e2e 留 dev),
+# 跳过 install 时 ~150MB 下载,节省 CI 时间 + 流量。打包真验证留 M1 #30。
+env:
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
 jobs:
   check:
     name: check (${{ matrix.os }})

@@ -9,9 +9,12 @@ import { hsCodeLookupTool } from "../src/tools/hs-code-lookup";
 import { sessionGetMetadataTool } from "../src/tools/session-get-metadata";
 
 describe("tools registry", () => {
-  it("4 个工具都注册（echo + #26 三个 safe-only）", () => {
-    expect(tools).toHaveLength(4);
+  it("7 个工具都注册（#25 echo + #26 三个 safe-only + #27 三个 browser review）", () => {
+    expect(tools).toHaveLength(7);
     expect(tools.map((t) => t.name).sort()).toEqual([
+      "browser_open",
+      "browser_read",
+      "browser_screenshot",
       "draft_save",
       "echo",
       "hs_code_lookup",
@@ -27,9 +30,14 @@ describe("tools registry", () => {
     expect(getToolByName("nonexistent")).toBeUndefined();
   });
 
-  it("safe 类工具 riskLevel 全为 safe（M1 #26 范围）", () => {
+  it("riskLevel 分布:#25 / #26 全 safe,#27 browser_* 全 review", () => {
     for (const tool of tools) {
-      expect(tool.riskLevel).toBe("safe");
+      if (tool.name.startsWith("browser_")) {
+        expect(tool.riskLevel).toBe("review");
+        expect(tool.category).toBe("browser");
+      } else {
+        expect(tool.riskLevel).toBe("safe");
+      }
     }
   });
 });
