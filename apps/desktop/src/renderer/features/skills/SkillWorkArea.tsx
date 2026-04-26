@@ -13,6 +13,9 @@
 
 import type { CCEvent, SkillManifest } from "@opentrad/shared";
 import { type ReactElement, useEffect, useState } from "react";
+import { MessageBubble } from "../../components/chat/MessageBubble";
+import { ToolCallCard } from "../../components/chat/ToolCallCard";
+import { ToolResultCard } from "../../components/chat/ToolResultCard";
 import { useSkillStore } from "../../stores/skill";
 import { SkillInputForm } from "./SkillInputForm";
 
@@ -212,45 +215,40 @@ function EventStream({ events }: { events: CCEvent[] }): ReactElement {
   );
 }
 
-function EventCard({ evt }: { evt: CCEvent }): ReactElement {
-  const baseStyle: React.CSSProperties = {
-    padding: "0.6rem 0.9rem",
-    borderRadius: 6,
-    fontSize: "0.85rem",
-    background: "#f8fafc",
-    color: "#475569",
-    border: "1px solid #e2e8f0",
-  };
-
+function EventCard({ evt }: { evt: CCEvent }): ReactElement | null {
+  // M1 #29 12a:升级 EventCard 用 MessageBubble / ToolCallCard / ToolResultCard。
+  // M0 简版的 inline 渲染替换为专用组件,markdown / 代码块 / 表格 / 工具卡片完整支持。
   if (evt.type === "assistant_text") {
-    return (
-      <div
-        style={{
-          ...baseStyle,
-          background: "#dbeafe",
-          color: "#1e3a8a",
-          border: "1px solid #93c5fd",
-        }}
-      >
-        {evt.text}
-      </div>
-    );
+    return <MessageBubble kind="text" content={evt.text} />;
   }
   if (evt.type === "assistant_thinking") {
-    return (
-      <details style={{ ...baseStyle, background: "#f3f4f6" }}>
-        <summary style={{ cursor: "pointer", fontSize: "0.8rem", color: "#6b7280" }}>
-          思考中…
-        </summary>
-        <div style={{ marginTop: "0.4rem", whiteSpace: "pre-wrap" }}>{evt.thinking}</div>
-      </details>
-    );
+    return <MessageBubble kind="thinking" content={evt.thinking} />;
+  }
+  if (evt.type === "assistant_tool_use") {
+    return <ToolCallCard toolName={evt.name} toolUseId={evt.toolUseId} input={evt.input} />;
+  }
+  if (evt.type === "tool_result") {
+    return <ToolResultCard toolUseId={evt.toolUseId} content={evt.content} isError={evt.isError} />;
   }
   if (evt.type === "result") {
-    return null as unknown as ReactElement; // result 在外层 finished 标显示
+    return null; // result 在外层 finished 标显示
   }
-  // system / rate_limit / assistant_tool_use / tool_result / unknown 用最简渲染
-  return <div style={{ ...baseStyle, fontSize: "0.75rem" }}>{evt.type}</div>;
+  // system / rate_limit_event / unknown:最简标 type(信息密度低)
+  return (
+    <div
+      style={{
+        padding: "0.4rem 0.7rem",
+        borderRadius: 6,
+        fontSize: "0.7rem",
+        background: "#f8fafc",
+        color: "#94a3b8",
+        border: "1px solid #e2e8f0",
+        fontFamily: '"SF Mono", Menlo, Monaco, monospace',
+      }}
+    >
+      {evt.type}
+    </div>
+  );
 }
 
 const mainStyle: React.CSSProperties = {
