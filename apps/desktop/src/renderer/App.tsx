@@ -194,7 +194,37 @@ function CcStatusInline({ state }: { state: CcStatusState }): ReactElement {
     return <span style={{ color: "#92400e" }}>CC 未安装</span>;
   }
   if (!s.loggedIn) {
-    return <span style={{ color: "#92400e" }}>v{s.version} · 未登录</span>;
+    // M1 #22:未登录时提供"点击登录"入口,reset onboarded=false + reload renderer
+    // 让 OnboardingGate 重新走 install/login 决策树进 LoginStep。
+    // M2 视需求改为更平滑路径(无需 reload,直接挂模态登录组件)。
+    const handleLoginClick = async (): Promise<void> => {
+      try {
+        await window.api.settings.set("onboarded", false);
+      } finally {
+        window.location.reload();
+      }
+    };
+    return (
+      <span style={{ color: "#92400e" }}>
+        v{s.version} · 未登录,
+        <button
+          type="button"
+          onClick={() => void handleLoginClick()}
+          style={{
+            background: "none",
+            border: "none",
+            padding: 0,
+            color: "#2563eb",
+            textDecoration: "underline",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+            fontFamily: "inherit",
+          }}
+        >
+          点击登录
+        </button>
+      </span>
+    );
   }
   const methodLabel = s.authMethod === "subscription" ? "订阅" : "API";
   return (
