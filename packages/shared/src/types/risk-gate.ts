@@ -61,3 +61,19 @@ export const RiskGateResponsePayloadSchema = z.object({
 });
 
 export type RiskGateResponsePayload = z.infer<typeof RiskGateResponsePayloadSchema>;
+
+// -------- M1 #28 阶段 4 settings/risk 子页 IPC --------
+
+export const RiskRulesDeleteRequestSchema = z.object({
+  id: z.number().int().positive(),
+});
+
+export type RiskRulesDeleteRequest = z.infer<typeof RiskRulesDeleteRequestSchema>;
+
+export const AuditLogQueryRequestSchema = z.object({
+  // 分页(M1 简化:offset / limit;真表很大时 M2 加 cursor 模式)
+  offset: z.number().int().nonnegative().default(0),
+  limit: z.number().int().positive().max(200).default(50),
+});
+
+export type AuditLogQueryRequest = z.infer<typeof AuditLogQueryRequestSchema>;

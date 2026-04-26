@@ -13,22 +13,52 @@
 //   timeout 后由 main 进程超时 deny)。这避免 renderer 错误丢失 → mcp-server hang。
 
 import {
+  type AuditLogQueryRequest,
+  AuditLogQueryRequestSchema,
+  type AuditLogRow,
   IpcChannels,
   type RiskGateResponsePayload,
   RiskGateResponsePayloadSchema,
+  type RiskRuleRow,
+  type RiskRulesDeleteRequest,
+  RiskRulesDeleteRequestSchema,
 } from "@opentrad/shared";
 import { ipcMain } from "electron";
+import type { DbServices } from "../services/db";
 import type { IpcRiskGatePrompter } from "../services/risk-gate";
 
 export interface RiskGateHandlerDeps {
   prompter: IpcRiskGatePrompter;
+  db: DbServices;
 }
 
 export function registerRiskGateHandlers(deps: RiskGateHandlerDeps): void {
-  const { prompter } = deps;
+  const { prompter, db } = deps;
 
   ipcMain.handle(IpcChannels.RiskGateResponse, async (_event, raw: unknown): Promise<void> => {
     const payload: RiskGateResponsePayload = RiskGateResponsePayloadSchema.parse(raw);
     prompter.resolveDecision(payload.requestId, payload.kind, payload.reason);
   });
+
+  // settings/risk 子页(M1 #28 阶段 4):
+  // - risk-rules:list / risk-rules:delete:规则管理
+  // - audit-log:query:审计日志分页查询
+  ipcMain.handle(IpcChannels.RiskRulesList, async (): Promise<RiskRuleRow[]> => {
+    return db.riskRules.list();
+  });
+
+  ipcMain.handle(IpcChannels.RiskRulesDelete, async (_event, raw: unknown): Promise<void> => {
+    const req: RiskRulesDeleteRequest = RiskRulesDeleteRequestSchema.parse(raw);
+    db.riskRules.delete(req.id);
+  });
+
+  ipcMain.handle(
+    IpcChannels.AuditLogQuery,
+    async (_event, raw: unknown): Promise<{ rows: AuditLogRow[]; total: number }> => {
+      const req: AuditLogQueryRequest = AuditLogQueryRequestSchema.parse(raw ?? {});
+      const rows = db.auditLog.queryAll({ limit: req.limit, offset: req.offset });
+      const total = db.auditLog.count();
+      return { rows, total };
+    },
+  );
 }

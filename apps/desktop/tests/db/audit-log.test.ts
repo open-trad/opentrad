@@ -84,3 +84,51 @@ describe("AuditLogService", () => {
     expect(page2.map((r) => r.toolName)).toEqual(["t6", "t5", "t4"]);
   });
 });
+
+describe("AuditLogService — queryAll + count(M1 #28 阶段 4)", () => {
+  let svc: DbServices;
+
+  beforeEach(() => {
+    svc = createDbServices({ dbPath: ":memory:" });
+  });
+
+  afterEach(() => {
+    svc.close();
+  });
+
+  it("queryAll 返回全表分页 timestamp DESC + count 返回总数", () => {
+    for (let i = 0; i < 5; i++) {
+      svc.auditLog.append({
+        timestamp: 1000 + i,
+        sessionId: `s${i}`,
+        toolName: "x",
+        decision: "allow",
+        automated: true,
+      });
+    }
+    expect(svc.auditLog.count()).toBe(5);
+    const all = svc.auditLog.queryAll();
+    expect(all).toHaveLength(5);
+    // timestamp DESC:1004 > 1003 > 1002 ...
+    expect(all[0]?.timestamp).toBe(1004);
+    expect(all[4]?.timestamp).toBe(1000);
+  });
+
+  it("queryAll 分页 limit / offset", () => {
+    for (let i = 0; i < 7; i++) {
+      svc.auditLog.append({
+        timestamp: 1000 + i,
+        sessionId: "s",
+        toolName: "x",
+        decision: "allow",
+        automated: true,
+      });
+    }
+    const page1 = svc.auditLog.queryAll({ limit: 3, offset: 0 });
+    const page2 = svc.auditLog.queryAll({ limit: 3, offset: 3 });
+    expect(page1).toHaveLength(3);
+    expect(page2).toHaveLength(3);
+    expect(page1[0]?.timestamp).toBe(1006);
+    expect(page2[0]?.timestamp).toBe(1003);
+  });
+});

@@ -35,5 +35,5 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   registerInstallerHandlers({ pty: deps.pty, detectLoop: deps.detectLoop });
   registerAuthHandlers({ pty: deps.pty });
   registerSkillHandlers();
-  registerRiskGateHandlers({ prompter: deps.riskGatePrompter });
+  registerRiskGateHandlers({ prompter: deps.riskGatePrompter, db: deps.db });
 }

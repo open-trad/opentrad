@@ -14,6 +14,8 @@
 // 详见 packages/shared/src/channels.ts module-level 注释。
 
 import type {
+  AuditLogQueryRequest,
+  AuditLogRow,
   AuthStartLoginFlowRequest,
   AuthStartLoginFlowResponse,
   CCCancelTaskRequest,
@@ -32,6 +34,8 @@ import type {
   PtyWriteRequest,
   RiskGateConfirmPayload,
   RiskGateResponsePayload,
+  RiskRuleRow,
+  RiskRulesDeleteRequest,
   ShellOpenExternalRequest,
   SkillManifest,
 } from "@opentrad/shared";
@@ -141,6 +145,16 @@ const api = {
     },
     sendResponse(payload: RiskGateResponsePayload): Promise<void> {
       return ipcRenderer.invoke(IpcChannels.RiskGateResponse, payload);
+    },
+    // settings/risk 子页(M1 #28 阶段 4)
+    listRules(): Promise<RiskRuleRow[]> {
+      return ipcRenderer.invoke(IpcChannels.RiskRulesList);
+    },
+    deleteRule(req: RiskRulesDeleteRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.RiskRulesDelete, req);
+    },
+    queryAuditLog(req: AuditLogQueryRequest): Promise<{ rows: AuditLogRow[]; total: number }> {
+      return ipcRenderer.invoke(IpcChannels.AuditLogQuery, req);
     },
   },
   // session 后续补

@@ -8,11 +8,13 @@
 // 内部触发,事件流在 SkillWorkArea EventStream 渲染。M1 #29 (#29) 时升级 ChatLayout。
 
 import type { CCStatus } from "@opentrad/shared";
+import { Settings } from "lucide-react";
 import { type ReactElement, useEffect, useState } from "react";
 import { SkillPicker } from "./components/layout/SkillPicker";
 import { TerminalPane } from "./components/ui/TerminalPane";
 import { OnboardingGate } from "./features/onboarding/OnboardingGate";
 import { RiskGateOverlay } from "./features/risk-gate/RiskGateOverlay";
+import { SettingsRiskOverlay } from "./features/settings/SettingsRiskOverlay";
 import { SkillWorkArea } from "./features/skills/SkillWorkArea";
 
 type CcStatusState =
@@ -37,6 +39,8 @@ function MainApp(): ReactElement {
   const [ccStatus, setCcStatus] = useState<CcStatusState>({ kind: "loading" });
   // PTY 面板默认折叠(M1 #20 / 02 F1.4)
   const [ptyOpen, setPtyOpen] = useState(false);
+  // settings/risk modal(M1 #28 阶段 4):Header 齿轮按钮触发
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // 加载 CC 状态(轮询 onStatus 由 #21 detect loop / 状态栏触发更新)
   useEffect(() => {
@@ -66,12 +70,13 @@ function MainApp(): ReactElement {
         color: "#333",
       }}
     >
-      <Header ccStatus={ccStatus} />
+      <Header ccStatus={ccStatus} onOpenSettings={() => setSettingsOpen(true)} />
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
         <SkillPicker />
         <SkillWorkArea />
       </div>
       <PtyDrawer open={ptyOpen} onToggle={() => setPtyOpen((v) => !v)} />
+      <SettingsRiskOverlay open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }
@@ -103,7 +108,13 @@ function PtyDrawer({ open, onToggle }: { open: boolean; onToggle: () => void }):
   );
 }
 
-function Header({ ccStatus }: { ccStatus: CcStatusState }): ReactElement {
+function Header({
+  ccStatus,
+  onOpenSettings,
+}: {
+  ccStatus: CcStatusState;
+  onOpenSettings: () => void;
+}): ReactElement {
   return (
     <header
       style={{
@@ -115,8 +126,25 @@ function Header({ ccStatus }: { ccStatus: CcStatusState }): ReactElement {
       }}
     >
       <h1 style={{ fontSize: "1.5rem", margin: 0 }}>OpenTrad</h1>
-      <div style={{ fontSize: "0.85rem" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "1rem", fontSize: "0.85rem" }}>
         <CcStatusInline state={ccStatus} />
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          aria-label="Risk 设置"
+          title="Risk 设置"
+          style={{
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+            padding: "0.25rem",
+            color: "#6b7280",
+            display: "inline-flex",
+            alignItems: "center",
+          }}
+        >
+          <Settings size={16} />
+        </button>
       </div>
     </header>
   );

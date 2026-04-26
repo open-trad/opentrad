@@ -39,6 +39,8 @@ export class AuditLogService {
   private readonly stmtAppend;
   private readonly stmtBySession;
   private readonly stmtByDateRange;
+  private readonly stmtAll;
+  private readonly stmtCount;
 
   constructor(db: Database.Database) {
     this.stmtAppend = db.prepare<
@@ -66,6 +68,11 @@ export class AuditLogService {
       `SELECT * FROM audit_log WHERE timestamp >= ? AND timestamp < ?
        ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`,
     );
+    // M1 #28 阶段 4 settings/risk 子页:全表分页(timestamp DESC)+ 总数
+    this.stmtAll = db.prepare<[number, number]>(
+      `SELECT * FROM audit_log ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`,
+    );
+    this.stmtCount = db.prepare(`SELECT COUNT(*) as c FROM audit_log`);
   }
 
   append(input: AuditLogAppendInput): void {
@@ -104,5 +111,16 @@ export class AuditLogService {
       opts.offset ?? 0,
     ) as AuditLogRawRow[];
     return rows.map(toDomain);
+  }
+
+  // 全表分页(M1 #28 阶段 4 settings/risk audit log 表)
+  queryAll(opts: { limit?: number; offset?: number } = {}): AuditLogRow[] {
+    const rows = this.stmtAll.all(opts.limit ?? 50, opts.offset ?? 0) as AuditLogRawRow[];
+    return rows.map(toDomain);
+  }
+
+  count(): number {
+    const row = this.stmtCount.get() as { c: number };
+    return row.c;
   }
 }
