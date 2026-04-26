@@ -13,7 +13,7 @@
 import type { CCStatus } from "@opentrad/shared";
 import { type ReactElement, type ReactNode, useEffect, useState } from "react";
 import { InstallStep } from "./InstallStep";
-import { LoginStepPlaceholder } from "./LoginStepPlaceholder";
+import { LoginStep } from "./LoginStep";
 
 const ONBOARDED_KEY = "onboarded";
 
@@ -105,7 +105,7 @@ export function OnboardingGate({ children }: OnboardingGateProps): ReactElement 
 
   if (state.kind === "login") {
     return (
-      <LoginStepPlaceholder
+      <LoginStep
         status={state.status}
         onLoggedIn={() => {
           void window.api.settings.set(ONBOARDED_KEY, true);
