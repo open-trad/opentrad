@@ -11,6 +11,7 @@
 //   7. result 事件到达后：McpConfigWriter.cleanup + SessionService.updateMeta + updateStatus completed
 
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { type CCManager, redactEmail } from "@opentrad/cc-adapter";
 import {
   type CCCancelTaskRequest,
@@ -20,10 +21,17 @@ import {
   type CCStatus,
   IpcChannels,
 } from "@opentrad/shared";
-import { ipcMain } from "electron";
+import { compose, loadFromDirectory } from "@opentrad/skill-runtime";
+import { app, ipcMain } from "electron";
 import type { DbServices } from "../services/db";
 import type { McpConfigWriter } from "../services/mcp-writer";
-import { composePrompt, loadFixtureSkill } from "../services/skill-fixture-loader";
+
+// fixture skill 目录(M1 临时:packaged 走 ~/.opentrad/skills/ 在 #30 落地)。
+// app.getAppPath() = apps/desktop,上 2 层到 monorepo root,再进 packages/skill-runtime/__fixtures__。
+// dev / packaged 行为一致(#21 PR #40 bug A 教训:不能用 __dirname 算源码深度,bundle 后会跑偏)。
+function getFixtureDir(): string {
+  return join(app.getAppPath(), "..", "..", "packages", "skill-runtime", "__fixtures__");
+}
 
 export interface CcHandlerDeps {
   manager: CCManager;
@@ -43,12 +51,9 @@ export function registerCcHandlers(deps: CcHandlerDeps): void {
     async (event, raw: unknown): Promise<CCStartTaskResponse> => {
       const req: CCStartTaskRequest = CCStartTaskRequestSchema.parse(raw);
 
-      // 1-2. 加载 skill manifest + 组装 prompt
-      // M1 #26 用 fixture loader 占位（packages/skill-runtime/__fixtures__/）。
-      // M1 #23 (#open-trad/opentrad#23) 真做 SkillLoader 后切换到
-      // import { SkillLoader, PromptComposer } from "@opentrad/skill-runtime"。
-      const loaded = loadFixtureSkill(req.skillId);
-      const fullPrompt = composePrompt(loaded, req.inputs);
+      // 1-2. 加载 skill manifest + 组装 prompt(M1 #23 SkillLoader / PromptComposer 接通)
+      const loaded = loadFromDirectory(join(getFixtureDir(), req.skillId));
+      const fullPrompt = compose(loaded, req.inputs);
       const { manifest } = loaded;
 
       const sessionId = randomUUID();

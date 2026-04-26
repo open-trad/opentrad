@@ -41,6 +41,9 @@ importers:
       '@opentrad/cc-adapter':
         specifier: workspace:^
         version: link:../../packages/cc-adapter
+      '@opentrad/skill-runtime':
+        specifier: workspace:^
+        version: link:../../packages/skill-runtime
       '@xterm/addon-fit':
         specifier: ^0.11.0
         version: 0.11.0
