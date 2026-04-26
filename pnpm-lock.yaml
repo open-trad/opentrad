@@ -41,6 +41,9 @@ importers:
       '@opentrad/cc-adapter':
         specifier: workspace:^
         version: link:../../packages/cc-adapter
+      '@opentrad/risk-gate':
+        specifier: workspace:^
+        version: link:../../packages/risk-gate
       '@opentrad/skill-runtime':
         specifier: workspace:^
         version: link:../../packages/skill-runtime

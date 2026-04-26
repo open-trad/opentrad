@@ -14,6 +14,8 @@
 // 详见 packages/shared/src/channels.ts module-level 注释。
 
 import type {
+  AuditLogQueryRequest,
+  AuditLogRow,
   AuthStartLoginFlowRequest,
   AuthStartLoginFlowResponse,
   CCCancelTaskRequest,
@@ -30,6 +32,10 @@ import type {
   PtySpawnRequest,
   PtySpawnResponse,
   PtyWriteRequest,
+  RiskGateConfirmPayload,
+  RiskGateResponsePayload,
+  RiskRuleRow,
+  RiskRulesDeleteRequest,
   ShellOpenExternalRequest,
   SkillManifest,
 } from "@opentrad/shared";
@@ -129,7 +135,29 @@ const api = {
       return ipcRenderer.invoke(IpcChannels.SkillList);
     },
   },
-  // session / risk-gate 后续补
+  riskGate: {
+    onConfirm(handler: (payload: RiskGateConfirmPayload) => void): () => void {
+      const listener = (_event: unknown, payload: RiskGateConfirmPayload): void => handler(payload);
+      ipcRenderer.on(IpcChannels.RiskGateConfirm, listener);
+      return () => {
+        ipcRenderer.removeListener(IpcChannels.RiskGateConfirm, listener);
+      };
+    },
+    sendResponse(payload: RiskGateResponsePayload): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.RiskGateResponse, payload);
+    },
+    // settings/risk 子页(M1 #28 阶段 4)
+    listRules(): Promise<RiskRuleRow[]> {
+      return ipcRenderer.invoke(IpcChannels.RiskRulesList);
+    },
+    deleteRule(req: RiskRulesDeleteRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.RiskRulesDelete, req);
+    },
+    queryAuditLog(req: AuditLogQueryRequest): Promise<{ rows: AuditLogRow[]; total: number }> {
+      return ipcRenderer.invoke(IpcChannels.AuditLogQuery, req);
+    },
+  },
+  // session 后续补
 } as const;
 
 export type OpenTradApi = typeof api;
