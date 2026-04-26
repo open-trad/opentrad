@@ -1,0 +1,68 @@
+# trade-email-writer — 外贸邮件助手(M1 #30 Part A 第一版)
+#
+# 02-mvp-slicing.md §四 Skill 3 + 03-architecture.md §4.3 manifest 格式。
+# 6 场景(报价/议价/催付/催货/售后/跟进)× 3 语气(formal/friendly/firm)。
+# riskLevel='draft_only':只生成草稿,不发邮件;mcp__*__send* 显式 disallowed。
+
+id: trade-email-writer
+title: 外贸邮件助手
+version: 0.1.0
+description: 外贸通信 6 场景 × 3 语气邮件草稿生成器,生成 2-3 份不同角度版本供选择
+category: communication
+riskLevel: draft_only
+
+allowedTools:
+  - mcp__opentrad__draft_save
+  # WebSearch 是 CC 内建工具(查市场行情 / 收件人公司背景),M1 prompt 不强制使用
+  - WebSearch
+
+disallowedTools:
+  # 防御性:本 skill 是 draft_only,绝不直接发邮件 / 跑 shell
+  - Bash(*)
+  - mcp__*__send*
+
+# draft_only 不需要业务级停止(M1 #28 RiskGate 业务级触发条件);
+# 真实发送动作由用户复制草稿到自己的邮件客户端,M1 不提供 send 工具
+stopBefore: []
+
+inputs:
+  - name: scenario
+    type: select
+    label: 场景
+    required: true
+    options:
+      - 报价
+      - 议价
+      - 催付
+      - 催货
+      - 售后
+      - 跟进
+
+  - name: context
+    type: textarea
+    label: 上下文(收件人 / 之前发生什么 / 本次目的)
+    placeholder: 例如:越南买家 ABC,30 天前付了 30% 定金,提单已发 15 天但 70% 余款没付,目标 firm 催付
+    required: true
+
+  - name: tone
+    type: select
+    label: 语气
+    required: true
+    default: formal
+    options:
+      - formal
+      - friendly
+      - firm
+
+  - name: previousEmail
+    type: textarea
+    label: 上一封邮件原文(可选,回复场景填,新邮件留空)
+    placeholder: 粘贴对方上一封原文 → 触发 reply 模式
+
+outputs:
+  - draftEmails
+  - subjectLines
+  - keyPhrases
+  - riskNotes
+
+promptTemplate: prompt.md

@@ -1,0 +1,7 @@
+<!-- trade-email-writer icon — M1 占位(蓝色信封)。M2 视品牌设计升级。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <rect x="6" y="14" width="52" height="36" rx="4" fill="#2563eb" stroke="#1e3a8a" stroke-width="2"/>
+  <path d="M6 18 L32 36 L58 18" stroke="white" stroke-width="2.5" fill="none"/>
+  <path d="M6 46 L24 30" stroke="white" stroke-width="1.5" fill="none" opacity="0.6"/>
+  <path d="M58 46 L40 30" stroke="white" stroke-width="1.5" fill="none" opacity="0.6"/>
+</svg>
