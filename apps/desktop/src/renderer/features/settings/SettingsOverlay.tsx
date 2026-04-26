@@ -1,32 +1,35 @@
-// SettingsRiskOverlay(M1 #28 阶段 4):/settings/risk 子页 modal-style。
+// SettingsOverlay(M1 #29 12b 重构):多 tab 设置 modal-style。
+// 历史:M1 #28 阶段 4 是 SettingsRiskOverlay(只 risk),M1 #29 升级为 5 tabs。
 //
 // **D9-1 决策**:M1 不引入 router 框架(react-router 等大依赖),用全屏 modal 等价
 // 实现 "settings 子页"。M2 真做 settings 框架时把 modal 改路由,接口契约不变。
 //
-// 两个 Tab:
+// 5 Tabs:
+// - General:语言切换(M1 显示但 i18n 完整支持留 follow-up)+ 主题(M2)
+// - CC:CC 版本 / 登录状态 / 安装路径 / "重新检测"按钮
 // - Rules:risk_rules 表所有规则,每条带"删除"按钮
 // - Audit:audit_log 全表分页(50/页),按 timestamp DESC
+// - About:版本号 / GitHub / AGPL-3.0
 //
 // 触发:Header 齿轮图标 → setOpen(true)。关闭:右上角 ✕ / 按 ESC / 点击 overlay 背景。
 
-import type { AuditLogRow, RiskRuleRow } from "@opentrad/shared";
+import type { AuditLogRow, CCStatus, RiskRuleRow } from "@opentrad/shared";
 import { Settings, Trash2, X } from "lucide-react";
 import { type ReactElement, useCallback, useEffect, useState } from "react";
 
 const PAGE_SIZE = 50;
+const APP_VERSION = "0.0.0"; // M1 hardcoded;M2 从 package.json runtime 读
+const REPO_URL = "https://github.com/open-trad/opentrad";
 
-export interface SettingsRiskOverlayProps {
+export interface SettingsOverlayProps {
   open: boolean;
   onClose: () => void;
 }
 
-type Tab = "rules" | "audit";
+type Tab = "general" | "cc" | "rules" | "audit" | "about";
 
-export function SettingsRiskOverlay({
-  open,
-  onClose,
-}: SettingsRiskOverlayProps): ReactElement | null {
-  const [tab, setTab] = useState<Tab>("rules");
+export function SettingsOverlay({ open, onClose }: SettingsOverlayProps): ReactElement | null {
+  const [tab, setTab] = useState<Tab>("general");
 
   // ESC 关闭
   useEffect(() => {
@@ -53,7 +56,7 @@ export function SettingsRiskOverlay({
         <header style={headerStyle}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
             <Settings size={18} aria-hidden="true" />
-            <h2 style={{ margin: 0, fontSize: "1.05rem" }}>Risk 设置</h2>
+            <h2 style={{ margin: 0, fontSize: "1.05rem" }}>设置</h2>
           </div>
           <button type="button" onClick={onClose} style={closeBtnStyle} aria-label="关闭">
             <X size={18} />
@@ -61,19 +64,221 @@ export function SettingsRiskOverlay({
         </header>
 
         <div style={tabBarStyle}>
+          <TabButton active={tab === "general"} onClick={() => setTab("general")}>
+            通用
+          </TabButton>
+          <TabButton active={tab === "cc"} onClick={() => setTab("cc")}>
+            Claude Code
+          </TabButton>
           <TabButton active={tab === "rules"} onClick={() => setTab("rules")}>
-            规则({/* count loaded after */})
+            规则
           </TabButton>
           <TabButton active={tab === "audit"} onClick={() => setTab("audit")}>
             审计日志
           </TabButton>
+          <TabButton active={tab === "about"} onClick={() => setTab("about")}>
+            关于
+          </TabButton>
         </div>
 
-        <div style={tabContentStyle}>{tab === "rules" ? <RulesTab /> : <AuditTab />}</div>
+        <div style={tabContentStyle}>
+          {tab === "general" && <GeneralTab />}
+          {tab === "cc" && <CcTab />}
+          {tab === "rules" && <RulesTab />}
+          {tab === "audit" && <AuditTab />}
+          {tab === "about" && <AboutTab />}
+        </div>
       </div>
     </div>
   );
 }
+
+// ----- General Tab -----
+// M1:语言切换 UI 占位(完整 i18n 全 UI 文案 follow-up issue);
+// 主题 UI 占位 disabled(M2 dark mode)。
+
+function GeneralTab(): ReactElement {
+  const [lang, setLang] = useState<"zh-CN" | "en">("zh-CN");
+
+  // M1 实际不做 i18n.changeLanguage(全 UI 文案改 t() 是 follow-up issue,
+  // 工作量超 12b 一个 commit 范围)。本 select 仅展示设计意图,选 en 后无视觉变化。
+  // M2 完整 i18n 落地后此 onChange 真实生效。
+  return (
+    <div>
+      <SettingItem label="语言" hint="界面文案语言(完整 i18n 在 follow-up issue 落地)">
+        <select
+          value={lang}
+          onChange={(e) => setLang(e.target.value as "zh-CN" | "en")}
+          style={selectStyle}
+        >
+          <option value="zh-CN">简体中文</option>
+          <option value="en">English</option>
+        </select>
+      </SettingItem>
+
+      <SettingItem label="主题" hint="M2 dark mode 落地后启用">
+        <select disabled style={{ ...selectStyle, opacity: 0.5, cursor: "not-allowed" }}>
+          <option>跟随系统(M2)</option>
+        </select>
+      </SettingItem>
+    </div>
+  );
+}
+
+// ----- CC Tab -----
+
+function CcTab(): ReactElement {
+  const [status, setStatus] = useState<CCStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const reload = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    try {
+      const s = await window.api.cc.status();
+      setStatus(s);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  return (
+    <div>
+      <SettingItem label="安装状态">
+        <span>
+          {loading ? "检测中…" : status?.installed ? `✓ 已安装 v${status.version}` : "× 未安装"}
+        </span>
+      </SettingItem>
+      <SettingItem label="登录状态">
+        <span>
+          {!status?.installed
+            ? "—"
+            : status.loggedIn
+              ? `✓ ${status.email ?? "(已登录)"} (${status.authMethod === "subscription" ? "订阅" : "API"})`
+              : "× 未登录"}
+        </span>
+      </SettingItem>
+      <SettingItem
+        label="安装路径"
+        hint="M1 仅显示 binary 名;实际路径由 PATH 解析(M2 显示 which 结果)"
+      >
+        <code style={codeStyle}>claude</code>
+      </SettingItem>
+      <button type="button" onClick={() => void reload()} style={primaryBtnStyle}>
+        重新检测
+      </button>
+    </div>
+  );
+}
+
+// ----- About Tab -----
+
+function AboutTab(): ReactElement {
+  const handleOpenRepo = async (): Promise<void> => {
+    try {
+      await window.api.shell.openExternal({ url: REPO_URL });
+    } catch (err) {
+      console.error("[about] openExternal failed", err);
+    }
+  };
+
+  return (
+    <div>
+      <h3 style={{ margin: "0 0 0.5rem", fontSize: "1.1rem", color: "#111827" }}>OpenTrad</h3>
+      <p style={{ margin: "0 0 1rem", color: "#6b7280", fontSize: "0.9rem" }}>
+        基于 Claude Code 的外贸 AI 工作台
+      </p>
+
+      <SettingItem label="版本">
+        <code style={codeStyle}>v{APP_VERSION}</code>
+      </SettingItem>
+      <SettingItem label="GitHub">
+        <button
+          type="button"
+          onClick={() => void handleOpenRepo()}
+          style={{
+            background: "none",
+            border: "none",
+            padding: 0,
+            color: "#2563eb",
+            textDecoration: "underline",
+            cursor: "pointer",
+            fontSize: "0.9rem",
+            fontFamily: "inherit",
+          }}
+        >
+          {REPO_URL.replace("https://", "")}
+        </button>
+      </SettingItem>
+      <SettingItem label="License">
+        <span style={{ fontSize: "0.85rem", color: "#374151" }}>AGPL-3.0</span>
+      </SettingItem>
+    </div>
+  );
+}
+
+// 通用 SettingItem
+function SettingItem({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}): ReactElement {
+  return (
+    <div style={{ marginBottom: "1.25rem" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: "1rem",
+        }}
+      >
+        <span
+          style={{
+            fontSize: "0.85rem",
+            color: "#374151",
+            fontWeight: 500,
+          }}
+        >
+          {label}
+        </span>
+        <div>{children}</div>
+      </div>
+      {hint ? (
+        <p style={{ margin: "0.3rem 0 0", fontSize: "0.75rem", color: "#94a3b8" }}>{hint}</p>
+      ) : null}
+    </div>
+  );
+}
+
+const selectStyle: React.CSSProperties = {
+  padding: "0.4rem 0.6rem",
+  fontSize: "0.85rem",
+  border: "1px solid #d1d5db",
+  borderRadius: 6,
+  background: "white",
+  fontFamily: "inherit",
+  minWidth: 160,
+};
+
+const primaryBtnStyle: React.CSSProperties = {
+  background: "#2563eb",
+  color: "white",
+  border: "none",
+  padding: "0.5rem 1rem",
+  borderRadius: 6,
+  cursor: "pointer",
+  fontSize: "0.85rem",
+  fontFamily: "inherit",
+  marginTop: "0.5rem",
+};
 
 // ----- Rules Tab -----
 

@@ -105,12 +105,25 @@ export const SessionDeleteRequestSchema = z.object({
 export type SessionDeleteRequest = z.infer<typeof SessionDeleteRequestSchema>;
 
 // -------- session:resume（Renderer → Main） --------
+// M1 #29 D-M1-7:M1 只查看不重启 CC,response 含 SessionMeta + 完整 events 数组。
+// events 是 CCEvent[](payload 已 normalize 后 union),不在本 schema 内重复 zod 校验
+// (CCEvent discriminated union 复杂,renderer 信任 main 端 normalize 输出)。
+// 不存在的 sessionId → null。
 
 export const SessionResumeRequestSchema = z.object({
   sessionId: z.string(),
 });
 
 export type SessionResumeRequest = z.infer<typeof SessionResumeRequestSchema>;
+
+// 注:CCEvent 类型在 cc-event.ts;本 interface 直接 import 引用,不走 zod schema
+// (避免 union 序列化复杂度,M1 实测层 wire 校验已在 stream-parser 完成)。
+import type { CCEvent } from "./cc-event";
+
+export interface SessionResumeResponse {
+  session: SessionMeta;
+  events: CCEvent[];
+}
 
 // -------- risk-gate:confirm（Main → Renderer push） --------
 // payload 是 RiskGateRequest（见 risk-gate.ts）。

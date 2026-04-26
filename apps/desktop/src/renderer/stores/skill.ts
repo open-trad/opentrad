@@ -12,10 +12,14 @@ import { create } from "zustand";
 interface SkillStoreState {
   skills: SkillManifest[];
   selectedId: string | null;
+  // M1 #29 12b:历史回放选中的 sessionId(null = chat 当前;string = 回放历史)。
+  // selectSkill 时清空,回到 form/chat;resumeSession 时设置,SkillWorkArea 进 replay。
+  replaySessionId: string | null;
   loading: boolean;
   error: string | null;
   loadSkills: () => Promise<void>;
   selectSkill: (id: string | null) => void;
+  resumeSession: (sessionId: string | null) => void;
   // 选中 skill 的 manifest(派生 getter)
   selectedSkill: () => SkillManifest | undefined;
 }
@@ -23,6 +27,7 @@ interface SkillStoreState {
 export const useSkillStore = create<SkillStoreState>((set, get) => ({
   skills: [],
   selectedId: null,
+  replaySessionId: null,
   loading: false,
   error: null,
   loadSkills: async () => {
@@ -41,7 +46,8 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
       });
     }
   },
-  selectSkill: (id) => set({ selectedId: id }),
+  selectSkill: (id) => set({ selectedId: id, replaySessionId: null }),
+  resumeSession: (sessionId) => set({ replaySessionId: sessionId }),
   selectedSkill: () => {
     const { skills, selectedId } = get();
     return skills.find((s) => s.id === selectedId);

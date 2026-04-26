@@ -14,7 +14,7 @@ import { TerminalPane } from "./components/ui/TerminalPane";
 import { MainLayout } from "./features/layout/MainLayout";
 import { OnboardingGate } from "./features/onboarding/OnboardingGate";
 import { RiskGateOverlay } from "./features/risk-gate/RiskGateOverlay";
-import { SettingsRiskOverlay } from "./features/settings/SettingsRiskOverlay";
+import { SettingsOverlay } from "./features/settings/SettingsOverlay";
 
 type CcStatusState =
   | { kind: "loading" }
@@ -74,7 +74,7 @@ function MainApp(): ReactElement {
         <MainLayout />
       </div>
       <PtyDrawer open={ptyOpen} onToggle={() => setPtyOpen((v) => !v)} />
-      <SettingsRiskOverlay open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsOverlay open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

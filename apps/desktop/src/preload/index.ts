@@ -36,6 +36,10 @@ import type {
   RiskGateResponsePayload,
   RiskRuleRow,
   RiskRulesDeleteRequest,
+  SessionListRequest,
+  SessionMeta,
+  SessionResumeRequest,
+  SessionResumeResponse,
   ShellOpenExternalRequest,
   SkillManifest,
 } from "@opentrad/shared";
@@ -133,6 +137,14 @@ const api = {
   skill: {
     list(): Promise<SkillManifest[]> {
       return ipcRenderer.invoke(IpcChannels.SkillList);
+    },
+  },
+  session: {
+    list(req: SessionListRequest = { limit: 50, offset: 0 }): Promise<SessionMeta[]> {
+      return ipcRenderer.invoke(IpcChannels.SessionList, req);
+    },
+    resume(req: SessionResumeRequest): Promise<SessionResumeResponse | null> {
+      return ipcRenderer.invoke(IpcChannels.SessionResume, req);
     },
   },
   riskGate: {

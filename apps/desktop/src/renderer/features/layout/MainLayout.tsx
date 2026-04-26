@@ -13,7 +13,7 @@
 
 import { type ReactElement, useEffect, useRef, useState } from "react";
 import { Group, type Layout, Panel, Separator } from "react-resizable-panels";
-import { SkillPicker } from "../../components/layout/SkillPicker";
+import { LeftSidebar } from "../../components/layout/LeftSidebar";
 import { SkillWorkArea } from "../skills/SkillWorkArea";
 
 const LAYOUT_KEY = "ui.layoutWidths";
@@ -82,7 +82,7 @@ export function MainLayout(): ReactElement | null {
     >
       <Panel id="left" minSize={15} maxSize={40}>
         <div style={paneStyle}>
-          <SkillPicker />
+          <LeftSidebar />
         </div>
       </Panel>
       <Separator id="sep-left" style={resizeHandleStyle} />

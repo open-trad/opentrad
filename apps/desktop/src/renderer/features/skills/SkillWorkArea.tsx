@@ -29,16 +29,83 @@ type WorkPhase =
       events: CCEvent[];
       finished: boolean;
       success?: boolean;
+    }
+  // M1 #29 12b D-M1-7:历史回放,read-only 渲染 events 表数据,**不重启 CC 子进程**。
+  | {
+      kind: "replay";
+      sessionId: string;
+      title: string;
+      skillId: string | null;
+      events: CCEvent[];
+      loading: boolean;
+      error?: string;
     };
 
 export function SkillWorkArea(): ReactElement {
-  const { selectedId, skills } = useSkillStore();
+  const selectedId = useSkillStore((s) => s.selectedId);
+  const skills = useSkillStore((s) => s.skills);
+  const replaySessionId = useSkillStore((s) => s.replaySessionId);
   const selectedSkill = skills.find((s) => s.id === selectedId);
 
   const [phase, setPhase] = useState<WorkPhase>({ kind: "empty" });
 
-  // selectedSkill 变化时重置 phase 为 form(若有 skill)或 empty
+  // replaySessionId 变化:进入 replay phase + 异步 fetch events
   useEffect(() => {
+    if (!replaySessionId) return;
+    setPhase({
+      kind: "replay",
+      sessionId: replaySessionId,
+      title: "加载中…",
+      skillId: null,
+      events: [],
+      loading: true,
+    });
+    let cancelled = false;
+    void window.api.session
+      .resume({ sessionId: replaySessionId })
+      .then((result) => {
+        if (cancelled) return;
+        if (!result) {
+          setPhase({
+            kind: "replay",
+            sessionId: replaySessionId,
+            title: "(会话不存在)",
+            skillId: null,
+            events: [],
+            loading: false,
+            error: "session not found",
+          });
+          return;
+        }
+        setPhase({
+          kind: "replay",
+          sessionId: replaySessionId,
+          title: result.session.title,
+          skillId: result.session.skillId,
+          events: result.events,
+          loading: false,
+        });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setPhase({
+          kind: "replay",
+          sessionId: replaySessionId,
+          title: "(加载失败)",
+          skillId: null,
+          events: [],
+          loading: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [replaySessionId]);
+
+  // selectedSkill 变化时重置 phase 为 form(若有 skill 且非 replay 中)或 empty
+  useEffect(() => {
+    if (replaySessionId) return; // replay 中,不被 skill 切换打断;skill 选了才会 selectSkill 清 replay
     if (selectedSkill) {
       setPhase((prev) => {
         // 同一 skill 已在 chat 中,不重置
@@ -48,7 +115,7 @@ export function SkillWorkArea(): ReactElement {
     } else {
       setPhase({ kind: "empty" });
     }
-  }, [selectedSkill]);
+  }, [selectedSkill, replaySessionId]);
 
   // 订阅 cc:event 流(chat 阶段)
   useEffect(() => {
@@ -116,6 +183,57 @@ export function SkillWorkArea(): ReactElement {
         <div style={contentStyle}>
           <SkillHeader skill={phase.skill} />
           <SkillInputForm skill={phase.skill} onSubmit={(i) => void handleSubmit(phase.skill, i)} />
+        </div>
+      </main>
+    );
+  }
+
+  // replay(M1 #29 12b 历史回放)
+  if (phase.kind === "replay") {
+    return (
+      <main style={mainStyle}>
+        <div style={contentStyle}>
+          <header
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
+              marginBottom: "1.25rem",
+              paddingBottom: "1rem",
+              borderBottom: "1px solid #e5e7eb",
+            }}
+          >
+            <div>
+              <h2 style={{ margin: 0, fontSize: "1.25rem", color: "#111827" }}>{phase.title}</h2>
+              <p style={{ margin: "0.25rem 0 0", fontSize: "0.85rem", color: "#6b7280" }}>
+                历史回放(read-only) {phase.skillId ? `· skill: ${phase.skillId}` : ""}
+              </p>
+            </div>
+            <span
+              style={{
+                fontSize: "0.75rem",
+                color: "#94a3b8",
+                background: "#f3f4f6",
+                padding: "0.2rem 0.5rem",
+                borderRadius: 4,
+              }}
+            >
+              session: {phase.sessionId.slice(0, 8)}…
+            </span>
+          </header>
+          {phase.loading ? (
+            <div style={{ color: "#9ca3af", padding: "2rem 0", fontSize: "0.9rem" }}>
+              加载历史事件…
+            </div>
+          ) : phase.error ? (
+            <div style={{ color: "#b91c1c", padding: "1rem 0" }}>{phase.error}</div>
+          ) : phase.events.length === 0 ? (
+            <div style={{ color: "#9ca3af", padding: "2rem 0", fontSize: "0.9rem" }}>
+              该会话无事件记录
+            </div>
+          ) : (
+            <EventStream events={phase.events} />
+          )}
         </div>
       </main>
     );
