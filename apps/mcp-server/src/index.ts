@@ -17,7 +17,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { BrowserService } from "@opentrad/browser-tools";
 import { z } from "zod";
 import { IpcBridgeClient } from "./ipc-bridge";
-import { MockRiskGate, type RiskGate } from "./risk-gate";
+import { runRiskGate } from "./middleware/risk-gate";
 import { getToolByName, tools } from "./tools";
 
 async function main(): Promise<void> {
@@ -46,8 +46,9 @@ async function main(): Promise<void> {
   // packaged 模式 PLAYWRIGHT_BROWSERS_PATH env 由 desktop 主进程注入(M1 #30)。
   const browserService = new BrowserService({ launchOptions: { headless: false } });
 
-  // RiskGate(M1 #27 用 MockRiskGate allow 所有,M1 #28 替换为 IpcRiskGate 走 bridge 弹窗)
-  const riskGate: RiskGate = new MockRiskGate();
+  // RiskGate(M1 #28):MockRiskGate 已删,所有 review-level tool 走 IPC bridge 调
+  // desktop 端真实 RiskGate.check(用户弹窗 + audit_log + 5min 超时)。
+  // middleware 在 CallToolRequest handler 内调 runRiskGate(...)。
 
   const server = new Server(
     { name: "opentrad", version: "0.0.0" },
@@ -71,31 +72,19 @@ async function main(): Promise<void> {
       };
     }
 
-    // RiskGate 拦截(M1 #27 落地点):review 走 RiskGate.requestApproval,blocked 直拒。
-    // safe 直接执行,与 #25 / #26 行为一致。
-    if (tool.riskLevel === "blocked") {
+    // RiskGate middleware(M1 #28):blocked → 直接拒;review → 走 IPC bridge 调
+    // desktop 端真实 RiskGate.check;safe → bypass。详见 middleware/risk-gate.ts。
+    const gateDecision = await runRiskGate({
+      bridge,
+      tool,
+      toolArgs: req.params.arguments,
+      sessionId,
+    });
+    if (!gateDecision.allowed) {
       return {
         isError: true,
-        content: [{ type: "text", text: `tool ${tool.name} is blocked by risk policy` }],
+        content: [{ type: "text", text: gateDecision.reason ?? `risk gate denied ${tool.name}` }],
       };
-    }
-    if (tool.riskLevel === "review") {
-      const decision = await riskGate.requestApproval({
-        sessionId,
-        toolName: tool.name,
-        params: req.params.arguments,
-      });
-      if (!decision.allowed) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: `user denied ${tool.name}${decision.reason ? `: ${decision.reason}` : ""}`,
-            },
-          ],
-        };
-      }
     }
 
     try {

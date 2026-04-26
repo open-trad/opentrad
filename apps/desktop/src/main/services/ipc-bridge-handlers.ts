@@ -1,11 +1,15 @@
-// 4 个 IPC bridge RPC handler 的实现（M1 #25）。
-// 把 IpcBridgeServer 的 wire 协议层跟具体业务（SQLite / fs）解耦。
+// 4 个 IPC bridge RPC handler 的实现（M1 #25 → M1 #28 真实化）。
+// 把 IpcBridgeServer 的 wire 协议层跟具体业务（SQLite / fs / RiskGate）解耦。
 //
-// M1 mock + 真实分阶段（issue body）：
-// - risk-gate.request：mock 返回 allow，真实在 M1 #11 / #28
-// - audit.log：直接走 AuditLogService.append（已在 M1 #19 / #32 落地）
+// **M1 #28 关键改动**：risk-gate.request mock 替换为真实 RiskGate.check（@opentrad/risk-gate）。
+// wire schema **0 改动**（RiskGateRpcParams 仍是 RiskGateRequest）;sessionId 由 ctx 提供;
+// stopBeforeList / category 在 desktop 端通过 resolveSkillContext 用 sessionId 查 skill manifest 补上。
+//
+// 4 个 RPC：
+// - risk-gate.request：真实 RiskGate.check 4 步判断 → audit_log → 返回 RiskGateDecision
+// - audit.log：直接走 AuditLogService.append（mcp-server 端独立 audit 调用）
 // - draft.save：写 ~/.opentrad/drafts/{date}-{filename}.md
-// - session.metadata：走 SessionService.get + 投影到 SessionMeta（不暴露 ccSessionPath 等）
+// - session.metadata：走 SessionService.get + 投影到 SessionMeta
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -21,15 +25,35 @@ import type {
 import type { DbServices } from "./db";
 import { getDraftsDir } from "./db/paths";
 import type { IpcBridgeHandlers } from "./ipc-bridge-server";
+import type { RiskGateBundle } from "./risk-gate";
 
-export function createIpcBridgeHandlers(db: DbServices): IpcBridgeHandlers {
+export function createIpcBridgeHandlers(
+  db: DbServices,
+  riskGateBundle: RiskGateBundle,
+): IpcBridgeHandlers {
   return {
-    async riskGateRequest(_params: RiskGateRpcParams): Promise<RiskGateRpcResult> {
-      // M1 mock：永远 allow。真实拦截在 M1 #11 / #28 由 RiskGate 引擎实现。
-      // 不写 audit_log（mcp-server 端如需 audit 走单独的 audit.log RPC）。
+    async riskGateRequest(
+      params: RiskGateRpcParams,
+      ctx: { sessionId: string },
+    ): Promise<RiskGateRpcResult> {
+      // sessionId 从 IPC bridge ctx 拿(由 hello 帧路由注入,与 wire 协议解耦)。
+      // skillId / stopBeforeList 通过 resolveSkillContext 从 db.sessions + skill manifest 查。
+      // graceful degrade(D-M1-5):查不到 skill context 时仍走 RiskGate(skillId=null,
+      // 无 stopBeforeList,业务级判断会退化为纯工具级)。
+      const skillContext = riskGateBundle.resolveSkillContext(ctx.sessionId);
+      const result = await riskGateBundle.gate.check({
+        sessionId: ctx.sessionId,
+        skillId: skillContext.skillId ?? params.skillId, // bridge params 兜底
+        toolName: params.toolName,
+        riskLevel: params.riskLevel,
+        params: params.params,
+        stopBeforeList: skillContext.stopBeforeList,
+        businessAction: params.businessAction,
+      });
+      // RiskGate.check 内部已写 audit_log;此处只投影 decision 到 wire schema
       return {
-        decision: "allow",
-        reason: "M1 mock allow (real RiskGate at M1 #11 / open-trad/opentrad#28)",
+        decision: result.decision,
+        reason: result.reason,
         timestamp: Date.now(),
       };
     },

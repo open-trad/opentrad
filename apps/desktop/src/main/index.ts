@@ -5,6 +5,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CCManager, redactEmail } from "@opentrad/cc-adapter";
+import { loadFromDirectory } from "@opentrad/skill-runtime";
 import { app, BrowserWindow, dialog } from "electron";
 import { registerIpcHandlers } from "./ipc";
 import { DetectLoopRegistry } from "./services/cc-detect-loop";
@@ -14,6 +15,7 @@ import { IpcBridgeServer } from "./services/ipc-bridge-server";
 import { type AppLock, AppLockHeldError, acquireAppLock } from "./services/lock";
 import { McpConfigWriter } from "./services/mcp-writer";
 import { PtyManager } from "./services/pty-manager";
+import { createRiskGate, type RiskGateBundle, type SkillContext } from "./services/risk-gate";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -35,10 +37,13 @@ const mcpWriter = new McpConfigWriter({
   mcpServerArgs: [join(REPO_ROOT, "apps", "mcp-server", "src", "index.ts")],
 });
 
-// 启动时初始化、退出时释放：lock + db + ipc-bridge server。
+// 启动时初始化、退出时释放：lock + db + ipc-bridge server + risk-gate。
 let appLock: AppLock | undefined;
 let dbServices: DbServices | undefined;
 let ipcBridgeServer: IpcBridgeServer | undefined;
+let riskGateBundle: RiskGateBundle | undefined;
+// 主窗口引用,RiskGate UserPrompter 通过 getMainWindow getter 拿
+let mainWindow: BrowserWindow | undefined;
 
 // contextIsolation + sandbox 按 03-architecture.md §9「沙箱和权限」开启。
 function createMainWindow(): BrowserWindow {
@@ -66,7 +71,48 @@ function createMainWindow(): BrowserWindow {
     void win.loadFile(join(__dirname, "../renderer/index.html"));
   }
 
+  win.on("closed", () => {
+    if (mainWindow === win) mainWindow = undefined;
+    // 清 RiskGate pending prompts(回 deny + reason='renderer_destroyed')
+    riskGateBundle?.prompter.cleanupAll();
+  });
+
   return win;
+}
+
+// SkillContext resolver:RiskGate 用 sessionId 查 db.sessions → skillId →
+// loadFromDirectory(fixture)拿 stopBefore。失败 graceful degrade(D-M1-5):
+// 返回 { skillId: null, stopBeforeList: [] },RiskGate 退化为纯工具级判断。
+function resolveSkillContext(sessionId: string): SkillContext {
+  if (!dbServices) return { skillId: null, stopBeforeList: [] };
+  try {
+    const session = dbServices.sessions.get(sessionId);
+    if (!session) return { skillId: null, stopBeforeList: [] };
+    const skillId = session.skillId;
+    if (!skillId) return { skillId: null, stopBeforeList: [] };
+    const fixtureDir = join(
+      app.getAppPath(),
+      "..",
+      "..",
+      "packages",
+      "skill-runtime",
+      "__fixtures__",
+      skillId,
+    );
+    try {
+      const loaded = loadFromDirectory(fixtureDir);
+      return {
+        skillId,
+        stopBeforeList: loaded.manifest.stopBefore ?? [],
+      };
+    } catch {
+      // skill 加载失败:返回 skillId 但无 stopBefore(audit_log 仍能记 skillId)
+      return { skillId, stopBeforeList: [] };
+    }
+  } catch (err) {
+    console.error("[risk-gate] resolveSkillContext failed", err);
+    return { skillId: null, stopBeforeList: [] };
+  }
 }
 
 app.whenReady().then(() => {
@@ -88,12 +134,18 @@ app.whenReady().then(() => {
   // SQLite 初始化（M1 #19 验收 1）：~/.opentrad/opentrad.db 自动建表。
   dbServices = createDbServices();
 
+  // RiskGate(M1 #28 阶段 2):RuleProvider/AuditLogger/UserPrompter 三 adapter +
+  // 5min timeout(在 main UserPrompter 内,既 user-facing 也是 IPC bridge 兜底)。
+  // mainWindow getter 让 prompter 拿到当前主窗口推 risk-gate:confirm channel。
+  riskGateBundle = createRiskGate(dbServices, () => mainWindow ?? null, resolveSkillContext);
+
   // IPC bridge server（M1 #25 验收 1）：~/.opentrad/ipc.sock 文件创建（macOS/Linux）
   // / Windows named pipe 建立。mcp-server 子进程通过它调 4 个 RPC。
+  // **M1 #28**:risk-gate.request handler 改用真实 RiskGate.check（mock 已替换）。
   // 启动失败不阻塞 app（mcp-server 端有 graceful degrade，echo 类 safe tool 仍可用）。
   ipcBridgeServer = new IpcBridgeServer({
     socketPath: getIpcSocketPath(),
-    handlers: createIpcBridgeHandlers(dbServices),
+    handlers: createIpcBridgeHandlers(dbServices, riskGateBundle),
   });
   ipcBridgeServer.start().catch((err) => {
     console.error("[main] IPC bridge server start failed", err);
@@ -105,13 +157,14 @@ app.whenReady().then(() => {
     pty: ptyManager,
     mcpWriter,
     detectLoop: detectLoopRegistry,
+    riskGatePrompter: riskGateBundle.prompter,
   });
-  createMainWindow();
+  mainWindow = createMainWindow();
 
   // macOS 点 dock icon 重启窗口（Electron 推荐行为）
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createMainWindow();
+      mainWindow = createMainWindow();
     }
   });
 });
