@@ -8,6 +8,7 @@
     "dev": "electron-vite dev",
     "prebuild": "node scripts/ensure-electron-abi.cjs",
     "build": "electron-vite build",
+    "build:dist": "electron-vite build && electron-builder",
     "typecheck": "tsc --noEmit",
     "start": "electron-vite preview",
     "test": "vitest run",
@@ -45,6 +46,7 @@
     "@types/react-dom": "^19.2.3",
     "@types/react-syntax-highlighter": "^15.5.13",
     "@vitejs/plugin-react": "^6.0.1",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
     "vite": "^8.0.10"
   }

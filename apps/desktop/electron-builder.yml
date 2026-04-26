@@ -1,0 +1,103 @@
+# OpenTrad electron-builder 三平台打包配置(M1 #30 Part B / open-trad/opentrad#30)
+#
+# **M1 第一段范围**:打包流程跑通 + artifact 体积验证(release.yml CI matrix)。
+# 真实 packaged 应用 e2e 验证留 Mac mini / Windows 真机段(D-pre-2 'm1-complete'
+# tag 之前)。
+#
+# 关键决策(03 ADR-007 + D-pre-1 + #27 留的 TODO):
+# - bundle Playwright Chromium 走 extraResources(用户零等待,用户体验断点最小)
+# - 应用体积目标 350-500MB(三平台 .dmg / .exe / .AppImage 各)
+# - 不签名(M3 加 macOS notarization + Windows code signing)
+
+appId: com.opentrad.desktop
+productName: OpenTrad
+copyright: Copyright © 2026 OpenTrad
+
+directories:
+  output: release/${version}
+  buildResources: build
+
+# 主代码:electron-vite build 输出 out/{main,preload,renderer}
+files:
+  - out/**/*
+  - package.json
+
+# extraResources(asar 之外,运行时 fs 直接读)
+# **TODO M2 packaged path 切换**:
+# - McpConfigWriter 当前 dev 模式用 REPO_ROOT/apps/mcp-server/src;packaged 模式
+#   应切到 process.resourcesPath/mcp-server。M2 落地路径切换 + esbuild bundle
+#   mcp-server 成单 .js(避免 tsx + 源码 .ts 依赖)。
+# - BrowserService 当前 dev 模式用 ~/Library/Caches/ms-playwright;packaged 模式
+#   应通过 PLAYWRIGHT_BROWSERS_PATH env 指向 process.resourcesPath/playwright。
+#   M2 desktop 主进程在 spawn mcp-server 时注入此 env。
+# - skill builtin 路径(retrospective followup #8)同款切换。
+extraResources:
+  # Playwright Chromium binary(ADR-007 + D-pre-1)
+  # CI release 流水线在 install 后跑 `pnpm --filter @opentrad/browser-tools setup`
+  # 下载 chromium 到 node_modules/playwright/.local-browsers,然后 electron-builder
+  # 把它打包到 Resources/playwright/
+  - from: ../../node_modules/playwright/.local-browsers
+    to: playwright
+    filter:
+      - "**/*"
+
+  # mcp-server 源码(M1 临时,packaged 模式 dev fallback;M2 改 esbuild bundle)
+  - from: ../mcp-server
+    to: mcp-server
+    filter:
+      - "src/**/*"
+      - "package.json"
+
+  # builtin skills(M1 #30A trade-email-writer + sample-skill fixture)
+  # M2 packaged 路径迁 ~/.opentrad/skills/(retrospective followup #8)
+  - from: ../../packages/skill-runtime/__fixtures__
+    to: skills
+    filter:
+      - "**/*"
+
+# macOS:Apple Silicon arm64 + Intel x64,.dmg 安装包 + .zip portable
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  category: public.app-category.business
+  # M3 加签名 / notarization:
+  # notarize: false  # M3 配 Apple Developer Account
+  # hardenedRuntime: true
+  # entitlements: build/entitlements.mac.plist
+
+# Windows:x64,.exe 安装包(NSIS) + .zip portable
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: zip
+      arch: [x64]
+  # M3 加 code signing:
+  # certificateFile: ...
+  # signtoolOptions: ...
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false  # 默认安装到用户目录(避免 admin 提权)
+
+# Linux:x64 .AppImage 自包含 + .deb 系统级
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  category: Office
+  maintainer: OpenTrad <noreply@opentrad>
+  vendor: OpenTrad
+
+# asar bundle 主代码;extraResources 路径不进 asar(运行时 fs 路径解析)
+asar: true
+asarUnpack:
+  # better-sqlite3 / node-pty native modules:
+  - "**/node_modules/better-sqlite3/**/*"
+  - "**/node_modules/node-pty/**/*"
