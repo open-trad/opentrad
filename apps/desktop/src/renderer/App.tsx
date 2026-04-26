@@ -10,12 +10,11 @@
 import type { CCStatus } from "@opentrad/shared";
 import { Settings } from "lucide-react";
 import { type ReactElement, useEffect, useState } from "react";
-import { SkillPicker } from "./components/layout/SkillPicker";
 import { TerminalPane } from "./components/ui/TerminalPane";
+import { MainLayout } from "./features/layout/MainLayout";
 import { OnboardingGate } from "./features/onboarding/OnboardingGate";
 import { RiskGateOverlay } from "./features/risk-gate/RiskGateOverlay";
-import { SettingsRiskOverlay } from "./features/settings/SettingsRiskOverlay";
-import { SkillWorkArea } from "./features/skills/SkillWorkArea";
+import { SettingsOverlay } from "./features/settings/SettingsOverlay";
 
 type CcStatusState =
   | { kind: "loading" }
@@ -72,11 +71,10 @@ function MainApp(): ReactElement {
     >
       <Header ccStatus={ccStatus} onOpenSettings={() => setSettingsOpen(true)} />
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
-        <SkillPicker />
-        <SkillWorkArea />
+        <MainLayout />
       </div>
       <PtyDrawer open={ptyOpen} onToggle={() => setPtyOpen((v) => !v)} />
-      <SettingsRiskOverlay open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsOverlay open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

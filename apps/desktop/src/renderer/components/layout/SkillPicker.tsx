@@ -8,8 +8,6 @@
 import { type ReactElement, useEffect } from "react";
 import { useSkillStore } from "../../stores/skill";
 
-const PICKER_WIDTH = 220;
-
 export function SkillPicker(): ReactElement {
   const { skills, selectedId, loading, error, loadSkills, selectSkill } = useSkillStore();
 
@@ -20,12 +18,10 @@ export function SkillPicker(): ReactElement {
   return (
     <aside
       style={{
-        width: PICKER_WIDTH,
-        flexShrink: 0,
-        borderRight: "1px solid #e5e7eb",
-        background: "#f8fafc",
+        flex: 1,
         display: "flex",
         flexDirection: "column",
+        minHeight: 0,
       }}
     >
       <header
