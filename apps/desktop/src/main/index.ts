@@ -22,6 +22,10 @@ import { createRiskGate, type RiskGateBundle, type SkillContext } from "./servic
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// 应用图标（build/icon.png）。dev 从源码树取，打包后 electron-builder 会用 build/icon.*
+// 作为应用图标（无需运行时引用），这里主要给 dev 的 dock/window 用。
+const APP_ICON_PATH = join(__dirname, "..", "..", "build", "icon.png");
+
 // 全局 CCManager 单例：所有 IPC handler 共享同一个 manager 以维持 activeTasks map。
 const ccManager = new CCManager();
 
@@ -59,6 +63,7 @@ function createMainWindow(): BrowserWindow {
     width: 1280,
     height: 800,
     title: "OpenTrad",
+    icon: APP_ICON_PATH, // Linux/Windows 窗口图标；macOS dock 图标见 app.dock.setIcon
     show: false, // 等 ready-to-show 避免白屏闪烁
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
@@ -124,6 +129,13 @@ function resolveSkillContext(sessionId: string): SkillContext {
 }
 
 app.whenReady().then(() => {
+  // macOS dock 图标（dev 模式；打包后由 electron-builder 设置）。失败静默。
+  if (process.platform === "darwin" && app.dock) {
+    try {
+      app.dock.setIcon(APP_ICON_PATH);
+    } catch {}
+  }
+
   // 单实例互斥（M1 #19 验收 6）：另一个 OpenTrad 已运行时，提示后退出。
   try {
     appLock = acquireAppLock();

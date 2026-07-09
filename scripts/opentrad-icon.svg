@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16a34a"/>
+      <stop offset="1" stop-color="#047857"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <!-- 对话气泡 -->
+  <path d="M300 300 h424 a56 56 0 0 1 56 56 v250 a56 56 0 0 1 -56 56 h-224 l-120 96 v-96 h-80 a56 56 0 0 1 -56 -56 v-250 a56 56 0 0 1 56 -56 z" fill="#ffffff" opacity="0.96"/>
+  <!-- 集装箱堆叠（外贸意象），置于气泡内 -->
+  <g fill="#16a34a">
+    <rect x="360" y="392" width="132" height="90" rx="10"/>
+    <rect x="510" y="392" width="132" height="90" rx="10"/>
+    <rect x="435" y="500" width="132" height="90" rx="10"/>
+  </g>
+</svg>

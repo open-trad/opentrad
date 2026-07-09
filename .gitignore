@@ -6,6 +6,11 @@ node_modules/
 dist/
 out/
 build/
+# 例外：应用图标是源码资产，不是构建产物（由 scripts/generate-icon.sh 生成后入库）
+!apps/desktop/build/
+apps/desktop/build/*
+!apps/desktop/build/icon.png
+!apps/desktop/build/icon.icns
 *.tsbuildinfo
 
 # Electron
