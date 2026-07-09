@@ -9,10 +9,24 @@ import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 // 把所有 dependencies 当 external，会让 main/preload 在 Node 运行时按
 // ESM 规则 resolve，找不到 `.ts` 扩展名报 ERR_MODULE_NOT_FOUND。
 // 把 @opentrad/* 排除（即一起 bundle）避开此问题。
+// 注意：ai / @ai-sdk/* 是被 bundle 的 workspace 包（agent-core 等）的依赖，
+// desktop 自身未声明，外部化后运行时从 out/main 解析不到——必须一并 bundle。
 const OPENTRAD_WORKSPACE_DEPS = [
   "@opentrad/shared",
   "@opentrad/stream-parser",
   "@opentrad/cc-adapter",
+  "@opentrad/risk-gate",
+  "@opentrad/skill-runtime",
+  "@opentrad/browser-tools",
+  "@opentrad/agent-core",
+  "@opentrad/model-providers",
+  "@opentrad/tool-host",
+  "@opentrad/connectors",
+  "ai",
+  "@ai-sdk/anthropic",
+  "@ai-sdk/openai",
+  "@ai-sdk/openai-compatible",
+  "@ai-sdk/mcp",
 ];
 
 export default defineConfig({
