@@ -7,6 +7,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { ensureManagedCdp } from "./daemon";
 import { type RunnerOptions, resolveBbBrowserPath, runBbBrowser } from "./runner";
 
 export interface PreflightStatus {
@@ -80,10 +81,24 @@ export async function checkPreflight(opts: RunnerOptions = {}): Promise<Prefligh
 }
 
 // 一键启动浏览器服务（daemon）。返回启动后的预检状态。
-// 走 `bb-browser daemon start`（内部会 launch 受管 Chrome）。
-export async function startDaemon(opts: RunnerOptions = {}): Promise<PreflightStatus> {
+// 端口自愈：先确保有活的 CDP 端点（ensureManagedCdp——清僵尸 + 换空闲端口 + spawn 受管
+// Chrome + 写 cdp-port），再 `bb-browser daemon start`（会命中 cdp-port 文件里的端口）。
+// opts.skipHeal（测试用）跳过自愈直接 daemon start。
+export async function startDaemon(
+  opts: RunnerOptions & { skipHeal?: boolean } = {},
+): Promise<PreflightStatus> {
   const cli = opts.cliPath ?? resolveBbBrowserPath();
   const spawnImpl = opts.spawnFn ?? spawn;
+
+  if (!opts.skipHeal) {
+    // 先自愈出一个活的 CDP 端点（不依赖 bb-browser 的固定 9222）
+    const heal = await ensureManagedCdp(findBrowser());
+    if (!heal.ok) {
+      const pre = await checkPreflight(opts);
+      return { ...pre, ready: false, daemonRunning: false, cdpConnected: false };
+    }
+  }
+
   await new Promise<void>((resolve) => {
     try {
       const child = spawnImpl(cli, ["daemon", "start"], { stdio: "ignore" });
@@ -93,21 +108,12 @@ export async function startDaemon(opts: RunnerOptions = {}): Promise<PreflightSt
       resolve();
     }
   });
-  // 给 daemon 起来一点时间后复检
   return checkPreflight(opts);
 }
 
 // 在受管浏览器打开某站点登录页（用户登录一次即持久到受管 profile）。
+// 先确保浏览器服务就绪（自愈端口 + daemon start），再开新标签到 loginUrl。
 export async function openSiteLogin(loginUrl: string, opts: RunnerOptions = {}): Promise<void> {
-  const cli = opts.cliPath ?? resolveBbBrowserPath();
-  const spawnImpl = opts.spawnFn ?? spawn;
-  await new Promise<void>((resolve) => {
-    try {
-      const child = spawnImpl(cli, ["tab", "new", loginUrl], { stdio: "ignore" });
-      child.on("close", () => resolve());
-      child.on("error", () => resolve());
-    } catch {
-      resolve();
-    }
-  });
+  await startDaemon(opts);
+  await runBbBrowser(["tab", "new", loginUrl], 10000, opts);
 }

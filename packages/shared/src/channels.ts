@@ -64,6 +64,9 @@ export const IpcChannels = {
   // 会话历史（侧栏「任务」列表 + 回放）
   AgentSessionsList: "agent:sessions:list",
   AgentSessionLoad: "agent:session:load",
+  // 更新检查（M0.5：检查 + 提示下载）
+  UpdateCheck: "update:check",
+  UpdateOpenReleasePage: "update:open-release-page",
   // -------- connector domain（bb-browser 选品站点连接器 + 预检，M0.5） --------
   // 预检 + 站点启用态（渲染插件页）
   ConnectorStatus: "connector:status",

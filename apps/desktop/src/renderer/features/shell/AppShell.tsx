@@ -95,6 +95,7 @@ export function AppShell(): ReactElement {
         onOpenSession={() => setView("chat")}
       />
       <main style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+        <UpdateBanner />
         {view === "new" ? (
           <HomeHero onStarted={() => setView("chat")} onGoPlugins={() => setView("plugins")} />
         ) : null}
@@ -107,6 +108,70 @@ export function AppShell(): ReactElement {
           </div>
         ) : null}
       </main>
+    </div>
+  );
+}
+
+// ---------------- Update Banner ----------------
+
+function UpdateBanner(): ReactElement | null {
+  const [info, setInfo] = useState<{ latest: string; url: string } | null>(null);
+  const [dismissed, setDismissed] = useState(false);
+
+  useEffect(() => {
+    void window.api.update
+      .check()
+      .then((r) => {
+        if (r.hasUpdate && r.latest && r.url) setInfo({ latest: r.latest, url: r.url });
+      })
+      .catch(() => {});
+  }, []);
+
+  if (!info || dismissed) return null;
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "0.5rem 1rem",
+        background: C.greenSoft,
+        borderBottom: `1px solid ${C.border}`,
+        fontSize: "0.85rem",
+        color: "#065f46",
+      }}
+    >
+      <span>OpenTrad {info.latest} 已发布，建议更新</span>
+      <button
+        type="button"
+        onClick={() => void window.api.update.openReleasePage(info.url)}
+        style={{
+          marginLeft: "auto",
+          padding: "0.25rem 0.7rem",
+          background: C.green,
+          color: "#fff",
+          border: "none",
+          borderRadius: 7,
+          fontSize: "0.8rem",
+          cursor: "pointer",
+        }}
+      >
+        下载新版
+      </button>
+      <button
+        type="button"
+        onClick={() => setDismissed(true)}
+        style={{
+          background: "transparent",
+          border: "none",
+          color: "#065f46",
+          cursor: "pointer",
+          fontSize: "1rem",
+        }}
+        aria-label="关闭"
+      >
+        ×
+      </button>
     </div>
   );
 }

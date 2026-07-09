@@ -21,6 +21,7 @@ import { registerRiskGateHandlers } from "./risk-gate";
 import { registerSessionHandlers } from "./session";
 import { registerSettingsHandlers } from "./settings";
 import { registerSkillHandlers } from "./skill";
+import { registerUpdateHandlers } from "./update";
 
 export interface IpcDeps {
   manager: CCManager;
@@ -38,6 +39,7 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   registerCcHandlers({ manager: deps.manager, db: deps.db, mcpWriter: deps.mcpWriter });
   registerAgentHandlers({ agent: deps.agent, credentials: deps.credentials });
   registerConnectorHandlers({ connector: deps.connector });
+  registerUpdateHandlers();
   registerSessionHandlers(deps.db);
   registerSettingsHandlers(deps.db);
   registerInstalledSkillHandlers(deps.db);

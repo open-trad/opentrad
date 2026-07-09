@@ -54,6 +54,7 @@ import type {
   SessionResumeResponse,
   ShellOpenExternalRequest,
   SkillManifest,
+  UpdateCheckResult,
 } from "@opentrad/shared";
 import { IpcChannels } from "@opentrad/shared/channels";
 import { contextBridge, ipcRenderer } from "electron";
@@ -215,6 +216,15 @@ const api = {
     },
     openLogin(siteId: string): Promise<ConnectorActionResult> {
       return ipcRenderer.invoke(IpcChannels.ConnectorOpenLogin, { siteId });
+    },
+  },
+  // 更新检查（M0.5：检查 + 提示下载）
+  update: {
+    check(): Promise<UpdateCheckResult> {
+      return ipcRenderer.invoke(IpcChannels.UpdateCheck);
+    },
+    openReleasePage(url: string): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.UpdateOpenReleasePage, { url });
     },
   },
   riskGate: {

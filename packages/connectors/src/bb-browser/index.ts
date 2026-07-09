@@ -7,6 +7,7 @@ import type { ToolDescriptor, ToolExecutionResult, ToolHost } from "@opentrad/to
 import { type BbRunResult, buildSiteArgs, type RunnerOptions, runBbBrowser } from "./runner";
 import { BB_SITES, type BbSite, getBbSite } from "./sites";
 
+export * from "./daemon";
 export * from "./preflight";
 export * from "./runner";
 export * from "./sites";

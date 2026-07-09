@@ -20,4 +20,5 @@ export * from "./types/ipc-bridge";
 export * from "./types/pty";
 export * from "./types/risk-gate";
 export * from "./types/skill";
+export * from "./types/update";
 export * from "./types/wire/cc-event";
