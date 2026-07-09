@@ -1,0 +1,54 @@
+# OpenTrad electron-builder 打包配置（M0.5：macOS 本地打包）。
+#
+# 与旧仓库配置的差异（新架构 ADR-001）：
+# - 不再 bundle Playwright Chromium（bb-browser 是用户全局装的外部 CLI，非内置；
+#   browser-tools 的 Playwright 是可选兜底，用到时按需，不预打包 ~150MB）
+# - 不打包 mcp-server（新架构自己是 MCP client，mcp-server 已封存）
+# - 主/preload/renderer 由 electron-vite 打进 out/，@opentrad/* 与 AI SDK 已内联
+# - native 模块（better-sqlite3 / node-pty）不能进 asar（dlopen 限制）→ asarUnpack
+# - 不签名（自用；分发要 notarization 时 M5 再加）
+
+appId: com.opentrad.desktop
+productName: OpenTrad
+copyright: Copyright © 2026 OpenTrad contributors
+
+directories:
+  output: release/${version}
+  buildResources: build
+
+# electron-vite build 产物 + package.json（electron-builder 据 dependencies 自动带 native 模块）
+files:
+  - out/**/*
+  - package.json
+  - "!**/*.map"
+
+# native .node 必须从 asar 解出才能 dlopen
+asarUnpack:
+  - "**/*.node"
+  - "**/node_modules/better-sqlite3/**"
+  - "**/node_modules/node-pty/**"
+
+# electron-builder 自己不 rebuild（我们用 rebuild:electron 在打包前切好 Electron ABI）
+npmRebuild: false
+
+mac:
+  category: public.app-category.business
+  icon: build/icon.icns
+  target:
+    - target: dir # 先出 .app（快）
+    - target: dmg # 再出 .dmg 安装包
+  # 不签名：自用。首次打开右键「打开」绕过 Gatekeeper。
+  identity: null
+  gatekeeperAssess: false
+
+dmg:
+  writeUpdateInfo: false
+  # 拖拽到 Applications 的标准布局
+  contents:
+    - x: 130
+      y: 220
+      type: file
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
