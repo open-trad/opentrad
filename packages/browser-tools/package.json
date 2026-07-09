@@ -1,0 +1,16 @@
+{
+  "name": "@opentrad/browser-tools",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "setup": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.59.1"
+  }
+}

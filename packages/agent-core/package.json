@@ -1,0 +1,17 @@
+{
+  "name": "@opentrad/agent-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentrad/shared": "workspace:^",
+    "zod": "^4.3.6",
+    "@opentrad/model-providers": "workspace:^",
+    "@opentrad/tool-host": "workspace:^"
+  }
+}
