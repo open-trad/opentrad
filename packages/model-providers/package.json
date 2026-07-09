@@ -10,7 +10,11 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.95",
+    "@ai-sdk/openai": "^3.0.82",
+    "@ai-sdk/openai-compatible": "^2.0.58",
     "@opentrad/shared": "workspace:^",
+    "ai": "^6.0.221",
     "zod": "^4.3.6"
   }
 }

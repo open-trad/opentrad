@@ -19,6 +19,13 @@ export interface AgentSessionConfig {
   maxSteps: number;
   // 单会话成本硬顶（USD）；超出立即终止并发 session_result subtype=budget_exceeded
   budgetUsd: number | null;
+  // 模型名（来自选定 ProviderProfile.model）：session_start 事件展示用；缺省 "unknown"
+  model?: string;
+  // 定价（来自选定 ProviderProfile.pricing）：每步 usage 成本估算用；null/缺省 = 定价未知，
+  // 此时 estimatedCostUsd 为 null 且预算硬顶无法生效（M1 考虑对未知定价拒绝设置预算）
+  pricing?: { inputPerMTokUsd: number; outputPerMTokUsd: number } | null;
+  // 每步后落 checkpoint（desktop 侧 SQLite 实现，M1 接线）；缺省不落
+  checkpoints?: CheckpointStore;
 }
 
 export type AgentEventListener = (event: AgentEvent) => void;
