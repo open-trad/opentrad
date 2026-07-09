@@ -62,7 +62,9 @@ export function registerBbSites(
   return registered;
 }
 
-// 执行单个站点搜索（供工具 handler 与直接调用复用）
+// 执行单个站点搜索（供工具 handler 与直接调用复用）。
+// 自愈：受管浏览器无标签页时（"No page target found"）自动开一个空标签页后重试一次
+// ——这是发起人实机遇到的"调用插件失败"的根因（daemon 起来了但没有 page target）。
 export async function runSite(
   site: BbSite,
   input: Record<string, unknown>,
@@ -70,7 +72,13 @@ export async function runSite(
 ): Promise<BbRunResult> {
   const argsOrErr = buildSiteArgs(site, input);
   if (!Array.isArray(argsOrErr)) return argsOrErr;
-  return runBbBrowser(argsOrErr, site.timeoutMs, opts);
+  let result = await runBbBrowser(argsOrErr, site.timeoutMs, opts);
+  if (!result.ok && result.error?.includes("No page target")) {
+    // 开一个空标签页，让 daemon 有可用的 page target，再重试一次
+    await runBbBrowser(["tab", "new", "about:blank"], 10000, opts);
+    result = await runBbBrowser(argsOrErr, site.timeoutMs, opts);
+  }
+  return result;
 }
 
 export { BB_SITES, getBbSite };

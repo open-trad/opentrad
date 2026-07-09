@@ -17,6 +17,8 @@ import {
   AgentProfileDeleteRequestSchema,
   AgentProfileSaveRequestSchema,
   AgentSendRequestSchema,
+  AgentSessionLoadRequestSchema,
+  type AgentSessionMeta,
   AgentStartSessionRequestSchema,
   type AgentStartSessionResponse,
   IpcChannels,
@@ -96,4 +98,14 @@ export function registerAgentHandlers(deps: AgentHandlerDeps): void {
       await credentials.delete(req.ref);
     },
   );
+
+  // 会话历史：列表 + 回放
+  ipcMain.handle(IpcChannels.AgentSessionsList, async (): Promise<AgentSessionMeta[]> => {
+    return agent.listSessions();
+  });
+
+  ipcMain.handle(IpcChannels.AgentSessionLoad, async (_event, raw: unknown): Promise<unknown[]> => {
+    const req = AgentSessionLoadRequestSchema.parse(raw);
+    return agent.loadSessionEvents(req.sessionId);
+  });
 }

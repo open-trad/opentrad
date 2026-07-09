@@ -87,11 +87,16 @@ export async function runBbBrowser(
       const parsed = tryParseJson(stdout);
       if (parsed && typeof parsed === "object") {
         const obj = parsed as Record<string, unknown>;
-        if (typeof obj.error === "string") {
+        // error 有两种形态（实机核实 2026-07-09）：
+        // - 适配器层：字符串 + 可选 hint/action（bb-sites 规范）
+        // - CLI/daemon 层：对象 {"error":{"message":"Daemon HTTP 400: ...No page target found..."}}
+        //   ——早期版本把后者误判为成功透传，这就是"调用了插件但提示失败"的根因之一
+        const errText = extractErrorText(obj.error);
+        if (errText !== null) {
           done({
             ok: false,
-            error: obj.error,
-            hint: typeof obj.hint === "string" ? obj.hint : undefined,
+            error: errText,
+            hint: typeof obj.hint === "string" ? obj.hint : hintForCliError(errText),
             action: typeof obj.action === "string" ? obj.action : undefined,
           });
           return;
@@ -104,6 +109,26 @@ export async function runBbBrowser(
       done(cliErrorResult(code, stderr || stdout));
     });
   });
+}
+
+// error 字段解包：字符串直接用；对象取 .message；其余非空值 stringify。null=无错误
+function extractErrorText(error: unknown): string | null {
+  if (error === undefined || error === null) return null;
+  if (typeof error === "string") return error;
+  if (typeof error === "object") {
+    const msg = (error as { message?: unknown }).message;
+    if (typeof msg === "string") return msg;
+    return JSON.stringify(error);
+  }
+  return String(error);
+}
+
+// 已知 CLI/daemon 错误的友好提示
+function hintForCliError(errText: string): string | undefined {
+  if (errText.includes("No page target")) {
+    return "受管浏览器没有打开的标签页，将自动打开后重试";
+  }
+  return undefined;
 }
 
 function spawnErrorResult(err: unknown): BbRunResult {

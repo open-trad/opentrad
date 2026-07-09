@@ -119,4 +119,14 @@ export const SCHEMA_SQL = `
     timestamp INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_agent_events_session_seq ON agent_events(session_id, seq);
+
+  -- agent 会话元数据（M0.5 会话历史）：标题/模型/创建时间，供侧栏「任务」列表与回放。
+  -- 会话内容（含用户消息）在 agent_events 里；本表只是索引 + 标题。
+  CREATE TABLE IF NOT EXISTS agent_sessions (
+    session_id TEXT PRIMARY KEY,
+    title TEXT,
+    model TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_sessions_created ON agent_sessions(created_at DESC);
 `;

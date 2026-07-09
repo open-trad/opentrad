@@ -197,6 +197,7 @@ describe("AgentService", () => {
       {
         profiles: db.providerProfiles,
         agentEvents: db.agentEvents,
+        agentSessions: db.agentSessions,
         credentials: fakeCredentials(),
         gate,
       },
@@ -298,6 +299,27 @@ describe("AgentService", () => {
     expect(rows.map((r) => r.seq)).toEqual([0, 1, 2, 3]);
     expect(rows.map((r) => r.type)).toEqual(received.map((e) => e.type));
     expect(JSON.parse(rows[1]?.payload ?? "")).toEqual(events[1]);
+  });
+
+  it("会话历史：startSession 建 agent_sessions 行，send 持久化用户消息 + 设标题，可回放", async () => {
+    const { service } = makeService();
+    service.saveProfile(PROFILE);
+    const sessionId = await service.startSession(baseReq(), { send: () => {} });
+
+    // startSession 建了会话元数据（标题此时为空）
+    let list = service.listSessions();
+    expect(list.map((s) => s.sessionId)).toContain(sessionId);
+    expect(list.find((s) => s.sessionId === sessionId)?.model).toBe("deepseek-chat");
+
+    // send 持久化用户消息并把首条设为标题
+    service.send(sessionId, "帮我找 usb hub 的货源");
+    list = service.listSessions();
+    expect(list.find((s) => s.sessionId === sessionId)?.title).toBe("帮我找 usb hub 的货源");
+
+    // 回放：事件流里含 agent_user 用户消息
+    const events = service.loadSessionEvents(sessionId) as { type: string; text?: string }[];
+    const userEvt = events.find((e) => e.type === "agent_user");
+    expect(userEvt?.text).toBe("帮我找 usb hub 的货源");
   });
 
   it("send 状态错误（并发/已结束）→ 转 agent_error 事件推回并落库", async () => {

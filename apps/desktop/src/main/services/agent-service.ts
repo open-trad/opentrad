@@ -28,7 +28,7 @@ import {
   type ToolApprovalHook,
   ToolHost,
 } from "@opentrad/tool-host";
-import type { AgentEventService, ProviderProfileService } from "./db";
+import type { AgentEventService, AgentSessionService, ProviderProfileService } from "./db";
 
 // 事件出口抽象：生产 = webContents.send 包装（见 ipc/agent.ts）；单测 = 数组收集器
 export interface AgentEventSink {
@@ -72,6 +72,7 @@ interface ActiveSession {
 export interface AgentServiceDeps {
   profiles: ProviderProfileService;
   agentEvents: AgentEventService;
+  agentSessions: AgentSessionService;
   credentials: CredentialStore;
   gate: RiskGate;
 }
@@ -126,6 +127,28 @@ export class AgentService {
   deleteProfile(id: string): void {
     this.registry.remove(id);
     this.deps.profiles.delete(id);
+  }
+
+  // ----- 会话历史（侧栏「任务」）-----
+
+  listSessions(): {
+    sessionId: string;
+    title: string | null;
+    model: string | null;
+    createdAt: number;
+  }[] {
+    return this.deps.agentSessions.list();
+  }
+
+  // 回放：返回该会话的全部事件 payload（含 agent_user 用户消息），renderer 重建 items
+  loadSessionEvents(sessionId: string): unknown[] {
+    return this.deps.agentEvents.readBySession(sessionId).map((row) => {
+      try {
+        return JSON.parse(row.payload);
+      } catch {
+        return { type: "unknown", raw: row.payload };
+      }
+    });
   }
 
   // ----- sessions -----
@@ -183,6 +206,13 @@ export class AgentService {
     session.unsubscribe = handle.onEvent((event) => this.dispatch(session, sessionId, event));
     this.sessions.set(sessionId, session);
 
+    // 会话历史元数据（侧栏「任务」列表）：标题在首条用户消息时补
+    try {
+      this.deps.agentSessions.create(sessionId, profile.model, Date.now());
+    } catch (err) {
+      console.error("[agent-service] agent_sessions create failed", err);
+    }
+
     // MCP 挂载失败作为可恢复错误推回（会话已建立可用，不阻断）
     for (const msg of mcpErrors) {
       this.dispatch(session, sessionId, {
@@ -199,6 +229,18 @@ export class AgentService {
   // 状态错误（并发 send / 会话已结束）转成 agent_error 事件推回 renderer。
   send(sessionId: string, message: string): void {
     const session = this.mustGet(sessionId);
+    // 持久化用户消息（历史回放要用；AgentEvent 流不含用户输入）+ 首条设为会话标题
+    try {
+      this.deps.agentEvents.append({
+        sessionId,
+        seq: session.seq++,
+        type: "agent_user",
+        payload: { type: "agent_user", sessionId, text: message },
+      });
+      this.deps.agentSessions.setTitleIfEmpty(sessionId, message.slice(0, 60));
+    } catch (err) {
+      console.error("[agent-service] persist user message failed", err);
+    }
     session.handle.send(message).catch((err) => {
       this.dispatch(session, sessionId, {
         type: "agent_error",

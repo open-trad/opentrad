@@ -83,3 +83,24 @@ export const AgentCredentialDeleteRequestSchema = z.object({
   ref: z.string().min(1),
 });
 export type AgentCredentialDeleteRequest = z.infer<typeof AgentCredentialDeleteRequestSchema>;
+
+// -------- agent:sessions:list / agent:session:load（会话历史） --------
+
+export interface AgentSessionMeta {
+  sessionId: string;
+  title: string | null;
+  model: string | null;
+  createdAt: number;
+}
+
+export const AgentSessionLoadRequestSchema = z.object({
+  sessionId: z.string().min(1),
+});
+export type AgentSessionLoadRequest = z.infer<typeof AgentSessionLoadRequestSchema>;
+
+// 用户消息事件（持久化在 agent_events，回放时 renderer 据此重建 user item）
+export interface AgentUserEvent {
+  type: "agent_user";
+  sessionId: string;
+  text: string;
+}

@@ -65,6 +65,11 @@ function createMainWindow(): BrowserWindow {
     title: "OpenTrad",
     icon: APP_ICON_PATH, // Linux/Windows 窗口图标；macOS dock 图标见 app.dock.setIcon
     show: false, // 等 ready-to-show 避免白屏闪烁
+    // macOS：隐藏标题栏、红绿灯浮在内容上（融入侧栏顶部，去网页套壳感）。
+    // 侧栏顶部留出安全区并设为可拖拽（见 renderer AppShell 的 drag region）。
+    ...(process.platform === "darwin"
+      ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 16, y: 18 } }
+      : {}),
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       contextIsolation: true,
@@ -177,6 +182,7 @@ app.whenReady().then(() => {
   agentService = new AgentService({
     profiles: dbServices.providerProfiles,
     agentEvents: dbServices.agentEvents,
+    agentSessions: dbServices.agentSessions,
     credentials: credentialStore,
     gate: riskGateBundle.gate,
   });

@@ -114,6 +114,19 @@ describe("runBbBrowser 错误分层", () => {
     expect(r.hint).toContain("npm install -g bb-browser");
   });
 
+  it("daemon 层对象形态错误 {error:{message}}：解包为失败，不误判成功", async () => {
+    // 发起人实机遇到的"调用插件失败"根因：早期把对象形态 error 误判为成功透传
+    const r = await runBbBrowser(["site", "google/search"], 5000, {
+      spawnFn: fakeSpawn({
+        stdout:
+          '{"error":{"message":"Daemon HTTP 400: {\\"error\\":{\\"message\\":\\"No page target found\\"}}"}}',
+      }),
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("No page target");
+    expect(r.hint).toContain("标签页");
+  });
+
   it("超时：返回超时错误不挂起", async () => {
     // 假 spawn 永不 close
     const hangSpawn = () => {

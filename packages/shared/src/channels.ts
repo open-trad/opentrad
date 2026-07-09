@@ -61,6 +61,9 @@ export const IpcChannels = {
   AgentProfilesDelete: "agent:profiles:delete",
   AgentCredentialsSet: "agent:credentials:set",
   AgentCredentialsDelete: "agent:credentials:delete",
+  // 会话历史（侧栏「任务」列表 + 回放）
+  AgentSessionsList: "agent:sessions:list",
+  AgentSessionLoad: "agent:session:load",
   // -------- connector domain（bb-browser 选品站点连接器 + 预检，M0.5） --------
   // 预检 + 站点启用态（渲染插件页）
   ConnectorStatus: "connector:status",

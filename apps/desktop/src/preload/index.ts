@@ -21,6 +21,7 @@ import type {
   AgentEvent,
   AgentProfileDeleteRequest,
   AgentSendRequest,
+  AgentSessionMeta,
   AgentStartSessionRequest,
   AgentStartSessionResponse,
   AuditLogQueryRequest,
@@ -192,6 +193,13 @@ const api = {
     },
     deleteCredential(req: AgentCredentialDeleteRequest): Promise<void> {
       return ipcRenderer.invoke(IpcChannels.AgentCredentialsDelete, req);
+    },
+    // 会话历史（侧栏「任务」）
+    listSessions(): Promise<AgentSessionMeta[]> {
+      return ipcRenderer.invoke(IpcChannels.AgentSessionsList);
+    },
+    loadSession(sessionId: string): Promise<unknown[]> {
+      return ipcRenderer.invoke(IpcChannels.AgentSessionLoad, { sessionId });
     },
   },
   // bb-browser 选品连接器（M0.5）：预检 + 启用站点 + 一键动作
