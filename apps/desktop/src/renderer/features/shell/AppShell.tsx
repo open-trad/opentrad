@@ -2,8 +2,8 @@
 // 左侧固定侧栏（新任务/插件/设置）+ 右侧主区（首页 hero / 对话 / 插件页 / 设置）。
 // 浅色主题、大圆角、OpenTrad 绿强调色。不引入路由库（沿 D9-1 无 router 决策），用 view 状态切换。
 
-import { BB_SITES } from "@opentrad/connectors";
 import type { ProviderProfile } from "@opentrad/model-providers";
+import { BB_SITES } from "@opentrad/shared";
 import { MessageSquarePlus, Plug, Settings as SettingsIcon } from "lucide-react";
 import { type ReactElement, useEffect, useState } from "react";
 import { useAgentStore } from "../../stores/agent";

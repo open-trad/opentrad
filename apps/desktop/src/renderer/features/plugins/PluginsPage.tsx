@@ -6,8 +6,8 @@
 //
 // 站点目录来自后端（BB_SITES）；这里通过 connector.status 拿启用态，用一份前端镜像渲染卡片元信息。
 
-import { BB_SITES } from "@opentrad/connectors";
 import type { ConnectorStatusResponse } from "@opentrad/shared";
+import { BB_SITES } from "@opentrad/shared";
 import { CheckCircle2, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { type ReactElement, useCallback, useEffect, useState } from "react";
 
