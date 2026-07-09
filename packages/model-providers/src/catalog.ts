@@ -183,6 +183,19 @@ export const PROVIDER_CATALOG: CatalogProvider[] = [
   },
 ];
 
+// 目录首项（UI 默认选中）。目录常量非空，此处提供类型安全的默认值。
+export const DEFAULT_CATALOG_PROVIDER: CatalogProvider = PROVIDER_CATALOG[0] as CatalogProvider;
+
+// 按 id 取 provider，找不到回落首项（UI 用，避免 undefined 判空）
+export function getCatalogProvider(providerId: string): CatalogProvider {
+  return PROVIDER_CATALOG.find((p) => p.id === providerId) ?? DEFAULT_CATALOG_PROVIDER;
+}
+
+// 在指定 provider 里按 id 取 model，找不到回落该 provider 首个型号
+export function getCatalogModel(provider: CatalogProvider, modelId: string): CatalogModel {
+  return provider.models.find((m) => m.id === modelId) ?? (provider.models[0] as CatalogModel);
+}
+
 // 从目录条目构造一个 ProviderProfile 的可持久化字段（不含 credentialRef——由调用方注入）。
 // UI 选定 provider+model 后调用，得到 profile 骨架，再补 id/displayName/credentialRef 落库。
 export function catalogModelToProfileFields(

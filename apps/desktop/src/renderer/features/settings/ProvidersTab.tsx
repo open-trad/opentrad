@@ -5,18 +5,17 @@
 //   API key 经 agent:credentials:set 进 main safeStorage 加密落库；本组件不回显、不留内存副本
 // - credentialRef 约定：apikey:<profileId>
 
-import type { ProviderProfile } from "@opentrad/model-providers";
+import {
+  catalogModelToProfileFields,
+  DEFAULT_CATALOG_PROVIDER,
+  getCatalogModel,
+  getCatalogProvider,
+  PROVIDER_CATALOG,
+  type ProviderProfile,
+} from "@opentrad/model-providers";
 import { Trash2 } from "lucide-react";
 import { type ReactElement, useEffect, useState } from "react";
 import { useAgentStore } from "../../stores/agent";
-
-type Kind = "anthropic" | "openai" | "openai-compatible";
-
-const KIND_PRESETS: Record<Kind, { baseUrl?: string; model: string }> = {
-  anthropic: { model: "claude-sonnet-4-5" },
-  openai: { model: "gpt-5.2" },
-  "openai-compatible": { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
-};
 
 export function ProvidersTab(): ReactElement {
   const profiles = useAgentStore((s) => s.profiles);
@@ -25,12 +24,9 @@ export function ProvidersTab(): ReactElement {
   const saveProfile = useAgentStore((s) => s.saveProfile);
   const deleteProfile = useAgentStore((s) => s.deleteProfile);
 
-  const [displayName, setDisplayName] = useState("");
-  const [kind, setKind] = useState<Kind>("openai-compatible");
-  const [baseUrl, setBaseUrl] = useState(KIND_PRESETS["openai-compatible"].baseUrl ?? "");
-  const [model, setModel] = useState(KIND_PRESETS["openai-compatible"].model);
-  const [inputPrice, setInputPrice] = useState("");
-  const [outputPrice, setOutputPrice] = useState("");
+  // 目录驱动：选厂商 → 选型号（自动带出 kind/baseUrl/model/定价）→ 填 key
+  const [providerId, setProviderId] = useState(DEFAULT_CATALOG_PROVIDER.id);
+  const [modelId, setModelId] = useState(DEFAULT_CATALOG_PROVIDER.models[0]?.id ?? "");
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,59 +36,37 @@ export function ProvidersTab(): ReactElement {
     if (!profilesLoaded) void loadProfiles();
   }, [profilesLoaded, loadProfiles]);
 
-  const handleKindChange = (next: Kind): void => {
-    setKind(next);
-    setBaseUrl(KIND_PRESETS[next].baseUrl ?? "");
-    setModel(KIND_PRESETS[next].model);
+  const provider = getCatalogProvider(providerId);
+  const model = getCatalogModel(provider, modelId);
+
+  const handleProviderChange = (next: string): void => {
+    setProviderId(next);
+    setModelId(getCatalogProvider(next).models[0]?.id ?? "");
   };
 
   const handleSave = async (): Promise<void> => {
     setError(null);
     setNotice(null);
-    if (!displayName.trim() || !model.trim()) {
-      setError("名称与模型必填");
-      return;
-    }
-    if (kind === "openai-compatible" && !baseUrl.trim()) {
-      setError("openai-compatible 必须填 Base URL");
-      return;
-    }
     if (!apiKey.trim()) {
       setError("API key 必填（存入系统 keychain，不明文落盘）");
       return;
     }
     const id = crypto.randomUUID();
-    const pricing =
-      inputPrice.trim() && outputPrice.trim()
-        ? {
-            inputPerMTokUsd: Number(inputPrice),
-            outputPerMTokUsd: Number(outputPrice),
-          }
-        : null;
-    if (
-      pricing &&
-      (Number.isNaN(pricing.inputPerMTokUsd) || Number.isNaN(pricing.outputPerMTokUsd))
-    ) {
-      setError("定价必须是数字（每百万 token 美元）");
-      return;
-    }
+    const fields = catalogModelToProfileFields(provider.id, model.id);
     const profile: ProviderProfile = {
       id,
-      displayName: displayName.trim(),
-      kind,
-      baseUrl: baseUrl.trim() || undefined,
-      model: model.trim(),
+      displayName: `${provider.displayName} · ${model.displayName}`,
+      kind: fields.kind,
+      baseUrl: fields.baseUrl,
+      model: fields.model,
       credentialRef: `apikey:${id}`,
-      pricing,
+      pricing: fields.pricing,
     };
     setSaving(true);
     try {
       await saveProfile(profile, apiKey);
-      setDisplayName("");
       setApiKey("");
-      setInputPrice("");
-      setOutputPrice("");
-      setNotice(`已保存 profile「${profile.displayName}」`);
+      setNotice(`已保存「${profile.displayName}」`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -155,71 +129,34 @@ export function ProvidersTab(): ReactElement {
         </table>
       )}
 
-      <h3 style={{ ...sectionTitleStyle, marginTop: "1.5rem" }}>新增 Profile</h3>
+      <h3 style={{ ...sectionTitleStyle, marginTop: "1.5rem" }}>接入模型</h3>
       <div style={formGridStyle}>
         <label style={labelStyle}>
-          名称
-          <input
-            type="text"
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
-            placeholder="如 DeepSeek 选品"
-            style={inputStyle}
-          />
-        </label>
-        <label style={labelStyle}>
-          类型
+          厂商
           <select
-            value={kind}
-            onChange={(e) => handleKindChange(e.target.value as Kind)}
+            value={providerId}
+            onChange={(e) => handleProviderChange(e.target.value)}
             style={inputStyle}
           >
-            <option value="anthropic">anthropic</option>
-            <option value="openai">openai</option>
-            <option value="openai-compatible">openai-compatible（DeepSeek/通义/Moonshot）</option>
+            {PROVIDER_CATALOG.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.displayName}
+              </option>
+            ))}
           </select>
         </label>
         <label style={labelStyle}>
-          Base URL{kind === "openai-compatible" ? "（必填）" : "（可选）"}
-          <input
-            type="text"
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://api.deepseek.com/v1"
-            style={inputStyle}
-          />
-        </label>
-        <label style={labelStyle}>
-          模型
-          <input
-            type="text"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            style={inputStyle}
-          />
-        </label>
-        <label style={labelStyle}>
-          输入价 $/MTok（可选）
-          <input
-            type="text"
-            value={inputPrice}
-            onChange={(e) => setInputPrice(e.target.value)}
-            placeholder="0.27"
-            style={inputStyle}
-          />
-        </label>
-        <label style={labelStyle}>
-          输出价 $/MTok（可选）
-          <input
-            type="text"
-            value={outputPrice}
-            onChange={(e) => setOutputPrice(e.target.value)}
-            placeholder="1.10"
-            style={inputStyle}
-          />
+          型号
+          <select value={modelId} onChange={(e) => setModelId(e.target.value)} style={inputStyle}>
+            {provider.models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.displayName} — {m.note}
+              </option>
+            ))}
+          </select>
         </label>
         <label style={{ ...labelStyle, gridColumn: "1 / -1" }}>
-          API key（存系统 keychain / safeStorage，保存后不可回看）
+          API key（{provider.credentialHint}；存系统 keychain，保存后不可回看）
           <input
             type="password"
             value={apiKey}
@@ -230,13 +167,18 @@ export function ProvidersTab(): ReactElement {
           />
         </label>
       </div>
+      <div style={{ fontSize: "0.78rem", color: "#9ca3af", margin: "0.4rem 0 0.8rem" }}>
+        定价约 ${model.inputPerMTokUsd} / ${model.outputPerMTokUsd} 每百万 token（输入/输出，
+        {provider.pricingConfidence === "high" ? "官方" : "估算"}，仅供参考）
+        {provider.baseUrl ? ` · 端点 ${provider.baseUrl}` : ""}
+      </div>
       <button
         type="button"
         onClick={() => void handleSave()}
         disabled={saving}
         style={{ ...primaryBtnStyle, opacity: saving ? 0.6 : 1 }}
       >
-        {saving ? "保存中…" : "保存 Profile"}
+        {saving ? "保存中…" : "保存并接入"}
       </button>
       {error ? <p style={{ color: "#b91c1c", fontSize: "0.8rem" }}>{error}</p> : null}
       {notice ? <p style={{ color: "#166534", fontSize: "0.8rem" }}>{notice}</p> : null}
