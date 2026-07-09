@@ -1,4 +1,5 @@
 // @opentrad/connectors：连接器规范 v1 与实现集。
-// M2：sourcing 站点适配器组（经 bb-browser MCP）；M4：shopify-admin。
+// bb-browser 选品站点组（经 CLI 包装，非 MCP——见 runner.ts 注释）；M4：shopify-admin。
 
+export * from "./bb-browser";
 export * from "./manifest";

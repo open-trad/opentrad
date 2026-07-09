@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@opentrad/shared": "workspace:^",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "@opentrad/tool-host": "workspace:^"
   }
 }
