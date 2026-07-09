@@ -17,9 +17,12 @@
     "smoke": "node scripts/smoke-electron-dlopen.cjs"
   },
   "dependencies": {
+    "@opentrad/agent-core": "workspace:^",
     "@opentrad/cc-adapter": "workspace:^",
+    "@opentrad/model-providers": "workspace:^",
     "@opentrad/risk-gate": "workspace:^",
     "@opentrad/skill-runtime": "workspace:^",
+    "@opentrad/tool-host": "workspace:^",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/xterm": "^6.0.0",

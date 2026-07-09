@@ -7,6 +7,7 @@
 
 export * from "./channels";
 export * from "./types/agent-event";
+export * from "./types/agent-ipc";
 export * from "./types/auth";
 export * from "./types/cc-event";
 export * from "./types/cc-task";

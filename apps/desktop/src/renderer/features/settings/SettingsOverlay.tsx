@@ -16,6 +16,7 @@
 import type { AuditLogRow, CCStatus, RiskRuleRow } from "@opentrad/shared";
 import { Settings, Trash2, X } from "lucide-react";
 import { type ReactElement, useCallback, useEffect, useState } from "react";
+import { ProvidersTab } from "./ProvidersTab";
 
 const PAGE_SIZE = 50;
 const APP_VERSION = "0.0.0"; // M1 hardcoded;M2 从 package.json runtime 读
@@ -26,7 +27,8 @@ export interface SettingsOverlayProps {
   onClose: () => void;
 }
 
-type Tab = "general" | "cc" | "rules" | "audit" | "about";
+// providers（M0 spike）：自建 agent loop 的 Provider Profile / API key 管理
+type Tab = "general" | "providers" | "cc" | "rules" | "audit" | "about";
 
 export function SettingsOverlay({ open, onClose }: SettingsOverlayProps): ReactElement | null {
   const [tab, setTab] = useState<Tab>("general");
@@ -67,6 +69,9 @@ export function SettingsOverlay({ open, onClose }: SettingsOverlayProps): ReactE
           <TabButton active={tab === "general"} onClick={() => setTab("general")}>
             通用
           </TabButton>
+          <TabButton active={tab === "providers"} onClick={() => setTab("providers")}>
+            Providers
+          </TabButton>
           <TabButton active={tab === "cc"} onClick={() => setTab("cc")}>
             Claude Code
           </TabButton>
@@ -83,6 +88,7 @@ export function SettingsOverlay({ open, onClose }: SettingsOverlayProps): ReactE
 
         <div style={tabContentStyle}>
           {tab === "general" && <GeneralTab />}
+          {tab === "providers" && <ProvidersTab />}
           {tab === "cc" && <CcTab />}
           {tab === "rules" && <RulesTab />}
           {tab === "audit" && <AuditTab />}

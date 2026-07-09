@@ -14,6 +14,7 @@
 import { type ReactElement, useEffect, useRef, useState } from "react";
 import { Group, type Layout, Panel, Separator } from "react-resizable-panels";
 import { LeftSidebar } from "../../components/layout/LeftSidebar";
+import { AgentChatPanel } from "../agent/AgentChatPanel";
 import { SkillWorkArea } from "../skills/SkillWorkArea";
 
 const LAYOUT_KEY = "ui.layoutWidths";
@@ -22,8 +23,13 @@ const DEFAULT_LAYOUT: Layout = { left: 20, center: 60, right: 20 };
 const DEBOUNCE_MS = 500;
 const GROUP_ID = "main-layout";
 
+// 中栏模式（M0 spike）：skill = 原有 CC 通道；agent = 自建 loop 对话。
+// 顶部轻量 toggle 切换，不动路由（沿 D9-1 无 router 决策）。
+type CenterMode = "skill" | "agent";
+
 export function MainLayout(): ReactElement | null {
   const [layout, setLayout] = useState<Layout | null>(null);
+  const [centerMode, setCenterMode] = useState<CenterMode>("skill");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 启动时异步加载持久化布局
@@ -88,7 +94,15 @@ export function MainLayout(): ReactElement | null {
       <Separator id="sep-left" style={resizeHandleStyle} />
       <Panel id="center" minSize={30}>
         <div style={paneStyle}>
-          <SkillWorkArea />
+          <div style={modeBarStyle}>
+            <ModeButton active={centerMode === "skill"} onClick={() => setCenterMode("skill")}>
+              Skill 模式
+            </ModeButton>
+            <ModeButton active={centerMode === "agent"} onClick={() => setCenterMode("agent")}>
+              Agent 对话（M0）
+            </ModeButton>
+          </div>
+          {centerMode === "skill" ? <SkillWorkArea /> : <AgentChatPanel />}
         </div>
       </Panel>
       <Separator id="sep-right" style={resizeHandleStyle} />
@@ -105,6 +119,45 @@ export function MainLayout(): ReactElement | null {
     </Group>
   );
 }
+
+function ModeButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}): ReactElement {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        background: "transparent",
+        border: "none",
+        padding: "0.45rem 0.8rem",
+        fontSize: "0.8rem",
+        cursor: "pointer",
+        borderBottom: active ? "2px solid #2563eb" : "2px solid transparent",
+        color: active ? "#2563eb" : "#6b7280",
+        fontFamily: "inherit",
+        fontWeight: active ? 500 : 400,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+const modeBarStyle: React.CSSProperties = {
+  display: "flex",
+  gap: "0.25rem",
+  padding: "0 0.75rem",
+  borderBottom: "1px solid #e5e7eb",
+  background: "#fff",
+  flexShrink: 0,
+};
 
 const paneStyle: React.CSSProperties = {
   height: "100%",

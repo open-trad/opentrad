@@ -6,9 +6,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CCManager, redactEmail } from "@opentrad/cc-adapter";
 import { loadFromDirectory } from "@opentrad/skill-runtime";
-import { app, BrowserWindow, dialog } from "electron";
+import { app, BrowserWindow, dialog, safeStorage } from "electron";
 import { registerIpcHandlers } from "./ipc";
+import { AgentService } from "./services/agent-service";
 import { DetectLoopRegistry } from "./services/cc-detect-loop";
+import { SafeStorageCredentialStore } from "./services/credential-store";
 import { createDbServices, type DbServices, getIpcSocketPath } from "./services/db";
 import { createIpcBridgeHandlers } from "./services/ipc-bridge-handlers";
 import { IpcBridgeServer } from "./services/ipc-bridge-server";
@@ -42,6 +44,9 @@ let appLock: AppLock | undefined;
 let dbServices: DbServices | undefined;
 let ipcBridgeServer: IpcBridgeServer | undefined;
 let riskGateBundle: RiskGateBundle | undefined;
+// M0 spike（重启方向）：自建 agent loop 的服务与 safeStorage 凭证仓
+let agentService: AgentService | undefined;
+let credentialStore: SafeStorageCredentialStore | undefined;
 // 主窗口引用,RiskGate UserPrompter 通过 getMainWindow getter 拿
 let mainWindow: BrowserWindow | undefined;
 
@@ -151,6 +156,16 @@ app.whenReady().then(() => {
     console.error("[main] IPC bridge server start failed", err);
   });
 
+  // M0 spike：safeStorage 凭证仓 + AgentService（自建 loop 会话管理，
+  // 审批钩子桥接上面的 riskGateBundle.gate——与 CC 通道共用同一套规则/审计/弹窗）。
+  credentialStore = new SafeStorageCredentialStore(dbServices.db, safeStorage);
+  agentService = new AgentService({
+    profiles: dbServices.providerProfiles,
+    agentEvents: dbServices.agentEvents,
+    credentials: credentialStore,
+    gate: riskGateBundle.gate,
+  });
+
   registerIpcHandlers({
     manager: ccManager,
     db: dbServices,
@@ -158,6 +173,8 @@ app.whenReady().then(() => {
     mcpWriter,
     detectLoop: detectLoopRegistry,
     riskGatePrompter: riskGateBundle.prompter,
+    agent: agentService,
+    credentials: credentialStore,
   });
   mainWindow = createMainWindow();
 
@@ -190,6 +207,14 @@ app.on("before-quit", async (event) => {
 });
 
 function finalizeShutdown(): void {
+  // agent 会话清理（中止 loop + 卸载 MCP 子进程）；async 但退出路径上 fire-and-forget
+  try {
+    void agentService?.disposeAll().catch((err) => {
+      console.error("[main] agent service dispose error", err);
+    });
+  } catch (err) {
+    console.error("[main] agent service dispose sync error", err);
+  }
   try {
     detectLoopRegistry.cleanupAll();
   } catch (err) {

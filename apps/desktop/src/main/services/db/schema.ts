@@ -17,6 +17,9 @@
 //
 // 外键：events.session_id → sessions.id ON DELETE CASCADE。
 
+// M0 spike（重启方向）追加 3 张新表：provider_profiles / credentials / agent_events。
+// 均为纯新增（CREATE TABLE IF NOT EXISTS 幂等），不改旧表结构，故 SCHEMA_VERSION 不 bump
+// （版本号语义留给"改动既有表"的迁移，见 init.ts 注释；M1 正式迁移机制时再收编）。
 export const SCHEMA_VERSION = 1;
 
 export const SCHEMA_SQL = `
@@ -89,4 +92,31 @@ export const SCHEMA_SQL = `
     enabled INTEGER NOT NULL DEFAULT 1,
     installed_at INTEGER NOT NULL
   );
+
+  -- ProviderProfile（模型 provider 配置）：JSON 列整体存 profile
+  --（形态由 @opentrad/model-providers 的 ProviderProfileSchema 定义，读出时 zod 校验）
+  CREATE TABLE IF NOT EXISTS provider_profiles (
+    id TEXT PRIMARY KEY,
+    json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  -- 凭证密文（Electron safeStorage 加密后的 BLOB）；SQLite 只存密文，绝无明文
+  CREATE TABLE IF NOT EXISTS credentials (
+    ref TEXT PRIMARY KEY,
+    ciphertext BLOB NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  -- AgentEvent 持久化（自建 loop 的事件流回放）；与旧 events 表（CCEvent）分开，不改旧表。
+  -- 无 sessions 外键：agent 会话 M0 不写 sessions 表（utilityProcess/checkpoint 接线在 M1）。
+  CREATE TABLE IF NOT EXISTS agent_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_events_session_seq ON agent_events(session_id, seq);
 `;

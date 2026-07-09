@@ -50,6 +50,17 @@ export const IpcChannels = {
   CCDetectLoopStop: "cc:detect-loop-stop",
   AuthStartLoginFlow: "auth:start-login-flow",
   ShellOpenExternal: "shell:open-external",
+  // -------- agent domain（重启方向 M0 spike：自建 agent loop 的 desktop 接线） --------
+  AgentStartSession: "agent:start-session",
+  AgentSend: "agent:send",
+  AgentAbort: "agent:abort",
+  // main → renderer push：AgentEvent 流
+  AgentEvent: "agent:event",
+  AgentProfilesList: "agent:profiles:list",
+  AgentProfilesSave: "agent:profiles:save",
+  AgentProfilesDelete: "agent:profiles:delete",
+  AgentCredentialsSet: "agent:credentials:set",
+  AgentCredentialsDelete: "agent:credentials:delete",
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];

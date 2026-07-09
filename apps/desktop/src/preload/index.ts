@@ -13,7 +13,16 @@
 // type imports 编译时擦除，不影响运行时，从根 export 拿 type 没问题。
 // 详见 packages/shared/src/channels.ts module-level 注释。
 
+import type { ProviderProfile } from "@opentrad/model-providers";
 import type {
+  AgentAbortRequest,
+  AgentCredentialDeleteRequest,
+  AgentCredentialSetRequest,
+  AgentEvent,
+  AgentProfileDeleteRequest,
+  AgentSendRequest,
+  AgentStartSessionRequest,
+  AgentStartSessionResponse,
   AuditLogQueryRequest,
   AuditLogRow,
   AuthStartLoginFlowRequest,
@@ -145,6 +154,42 @@ const api = {
     },
     resume(req: SessionResumeRequest): Promise<SessionResumeResponse | null> {
       return ipcRenderer.invoke(IpcChannels.SessionResume, req);
+    },
+  },
+  // 自建 agent loop（M0 spike）。send 是 fire-and-forget：invoke 立即返回，
+  // 文本/工具/usage/result 全部经 onEvent 订阅的 agent:event 流推回。
+  agent: {
+    startSession(req: AgentStartSessionRequest): Promise<AgentStartSessionResponse> {
+      return ipcRenderer.invoke(IpcChannels.AgentStartSession, req);
+    },
+    send(req: AgentSendRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.AgentSend, req);
+    },
+    abort(req: AgentAbortRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.AgentAbort, req);
+    },
+    onEvent(handler: (evt: AgentEvent) => void): () => void {
+      const listener = (_event: unknown, evt: AgentEvent): void => handler(evt);
+      ipcRenderer.on(IpcChannels.AgentEvent, listener);
+      return () => {
+        ipcRenderer.removeListener(IpcChannels.AgentEvent, listener);
+      };
+    },
+    listProfiles(): Promise<ProviderProfile[]> {
+      return ipcRenderer.invoke(IpcChannels.AgentProfilesList);
+    },
+    saveProfile(profile: ProviderProfile): Promise<ProviderProfile> {
+      return ipcRenderer.invoke(IpcChannels.AgentProfilesSave, { profile });
+    },
+    deleteProfile(req: AgentProfileDeleteRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.AgentProfilesDelete, req);
+    },
+    // secret 单向进 main（safeStorage 加密落库），无 get 通道——renderer 永远读不回明文
+    setCredential(req: AgentCredentialSetRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.AgentCredentialsSet, req);
+    },
+    deleteCredential(req: AgentCredentialDeleteRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.AgentCredentialsDelete, req);
     },
   },
   riskGate: {

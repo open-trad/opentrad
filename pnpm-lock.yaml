@@ -38,15 +38,24 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@opentrad/agent-core':
+        specifier: workspace:^
+        version: link:../../packages/agent-core
       '@opentrad/cc-adapter':
         specifier: workspace:^
         version: link:../../packages/cc-adapter
+      '@opentrad/model-providers':
+        specifier: workspace:^
+        version: link:../../packages/model-providers
       '@opentrad/risk-gate':
         specifier: workspace:^
         version: link:../../packages/risk-gate
       '@opentrad/skill-runtime':
         specifier: workspace:^
         version: link:../../packages/skill-runtime
+      '@opentrad/tool-host':
+        specifier: workspace:^
+        version: link:../../packages/tool-host
       '@xterm/addon-fit':
         specifier: ^0.11.0
         version: 0.11.0
