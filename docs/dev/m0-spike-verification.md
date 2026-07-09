@@ -33,16 +33,21 @@ pnpm dev              # 启动 desktop（electron-vite dev）
    - 轮末出现 `✓ 本轮完成 · n 步 · 累计 $…`
 4. 换 Anthropic profile 重复一次（新建会话）。
 
-## 3. 挂 bb-browser MCP + 工具调用触发审批弹窗
+## 3. 选品连接（M0.5：图形化插件页，非 MCP 命令）
 
-1. 结束并新建会话：Profile 任选，MCP server 命令填 bb-browser 的 MCP 启动命令（以实际安装为准，如：
-   `npx bb-browser-mcp`；bb-browser 需先在本机跑起来并登录目标站点）。
-2. 新建会话成功后 header 显示 `工具 N 个`（N>0 = listTools 挂载成功；工具名带 `mcp:bb:` 前缀）。
-3. 发起会用到工具的请求（如"用工具搜一下 usb hub 的商品列表"）：
-   - 出现紫色工具调用卡片（参数可展开）
-   - 非只读工具（无 readOnlyHint）默认 riskLevel=review → **弹出现有 Risk Gate 审批弹窗**
-   - 点"允许一次" → 工具执行，结果卡片出现，loop 继续
-4. 只读工具（readOnlyHint=true → safe）应直放不弹窗。
+> 更正：bb-browser v0.14 无 mcp 子命令，早期"填 MCP 命令"的方式已废弃（那正是
+> Connection closed 的根因）。改为插件页图形化启用站点，会话自动注册为 `site:<id>` 工具。
+> 前提：本机装有 Chromium 系浏览器（Chrome/Edge/Brave）。
+
+1. 侧栏进「插件」页：顶部状态条显示 CLI / 浏览器 / 浏览器服务三态。
+   - 未就绪时点「启动浏览器服务」一键拉起 daemon；缺浏览器/CLI 给安装指引，**不裸报错**。
+2. 在需要的站点卡片上打开「启用」开关；需登录的站点（淘宝/1688/京东等）点「打开登录」，
+   在弹出的受管浏览器里登录一次（登录态持久到受管 profile）。
+3. 回「新任务」发起会用到该站点的请求（如"用 1688 搜一下 usb hub 的货源"）：
+   - 出现工具调用卡片（站点搜索）
+   - 站点均为只读 → riskLevel=safe，默认直放不弹窗
+   - 结果卡片返回商品列表；若站点需登录/反爬拦截，返回友好三层提示（error/hint/action）而非崩溃
+4. 自定义 MCP server（DIY 用户）：挂载失败不再让会话崩溃——转 agent_error 提示，纯对话照常可用。
 
 ## 4. deny 生效
 
