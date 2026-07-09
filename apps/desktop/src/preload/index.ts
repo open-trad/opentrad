@@ -32,6 +32,8 @@ import type {
   CCStartTaskRequest,
   CCStartTaskResponse,
   CCStatus,
+  ConnectorActionResult,
+  ConnectorStatusResponse,
   InstallerRunCcInstallResponse,
   InstallerSupportsAutoInstallResponse,
   PtyDataEvent,
@@ -190,6 +192,21 @@ const api = {
     },
     deleteCredential(req: AgentCredentialDeleteRequest): Promise<void> {
       return ipcRenderer.invoke(IpcChannels.AgentCredentialsDelete, req);
+    },
+  },
+  // bb-browser 选品连接器（M0.5）：预检 + 启用站点 + 一键动作
+  connector: {
+    status(): Promise<ConnectorStatusResponse> {
+      return ipcRenderer.invoke(IpcChannels.ConnectorStatus);
+    },
+    setEnabled(siteId: string, enabled: boolean): Promise<string[]> {
+      return ipcRenderer.invoke(IpcChannels.ConnectorSetEnabled, { siteId, enabled });
+    },
+    startDaemon(): Promise<ConnectorActionResult> {
+      return ipcRenderer.invoke(IpcChannels.ConnectorDaemonStart);
+    },
+    openLogin(siteId: string): Promise<ConnectorActionResult> {
+      return ipcRenderer.invoke(IpcChannels.ConnectorOpenLogin, { siteId });
     },
   },
   riskGate: {

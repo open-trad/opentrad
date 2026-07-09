@@ -59,6 +59,7 @@ interface AgentStoreState {
   deleteProfile: (id: string) => Promise<void>;
   startSession: (req: {
     profileId: string;
+    enabledSites?: string[];
     mcpServers?: { name: string; command: string; args?: string[] }[];
   }) => Promise<void>;
   sendMessage: (text: string) => Promise<void>;
@@ -138,6 +139,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => {
           profileId: req.profileId,
           maxSteps: 50,
           budgetUsd: null,
+          enabledSites: req.enabledSites ?? [],
           mcpServers: req.mcpServers ?? [],
         });
         set({ sessionId });

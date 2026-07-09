@@ -11,6 +11,7 @@
 
 import { randomUUID } from "node:crypto";
 import { type AgentSessionHandle, createAgentSession } from "@opentrad/agent-core";
+import { registerBbSites } from "@opentrad/connectors";
 import {
   ApiKeyBackend,
   type ChatBackend,
@@ -137,15 +138,26 @@ export class AgentService {
     const sessionId = randomUUID();
     const toolHost = new ToolHost(createRiskGateApprovalHook(this.deps.gate, sessionId));
 
-    // MCP 挂载：任一失败即整体失败并回滚已挂载的 server（不留半就绪会话）
-    const mounts: McpMountHandle[] = [];
+    // bb-browser 选品站点工具（已启用站点）：同步注册，只挂 handler 不 spawn（执行时才 spawn），不会失败。
     try {
-      for (const config of req.mcpServers) {
-        mounts.push(await this.mountMcp(toolHost, toMcpConfig(config)));
-      }
+      registerBbSites(toolHost, req.enabledSites);
     } catch (err) {
-      await closeMounts(mounts);
-      throw err;
+      console.error("[agent-service] register bb sites failed", err);
+    }
+
+    // MCP 挂载：graceful——失败不再让整个会话失败（发起人反馈：bb-browser 挂载失败曾导致
+    // start-session 整体崩）。失败信息收集后作为 agent_error 推回，会话照常可用（纯对话 +
+    // 已注册的站点工具仍然工作）。
+    const mounts: McpMountHandle[] = [];
+    const mcpErrors: string[] = [];
+    for (const config of req.mcpServers) {
+      try {
+        mounts.push(await this.mountMcp(toolHost, toMcpConfig(config)));
+      } catch (err) {
+        mcpErrors.push(
+          `MCP server「${config.name}」挂载失败：${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     const backend = this.createBackend(profile, this.deps.credentials);
@@ -170,6 +182,16 @@ export class AgentService {
     };
     session.unsubscribe = handle.onEvent((event) => this.dispatch(session, sessionId, event));
     this.sessions.set(sessionId, session);
+
+    // MCP 挂载失败作为可恢复错误推回（会话已建立可用，不阻断）
+    for (const msg of mcpErrors) {
+      this.dispatch(session, sessionId, {
+        type: "agent_error",
+        sessionId,
+        message: msg,
+        recoverable: true,
+      });
+    }
     return sessionId;
   }
 

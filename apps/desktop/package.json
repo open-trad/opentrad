@@ -19,6 +19,7 @@
   "dependencies": {
     "@opentrad/agent-core": "workspace:^",
     "@opentrad/cc-adapter": "workspace:^",
+    "@opentrad/connectors": "workspace:^",
     "@opentrad/model-providers": "workspace:^",
     "@opentrad/risk-gate": "workspace:^",
     "@opentrad/skill-runtime": "workspace:^",

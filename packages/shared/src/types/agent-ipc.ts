@@ -27,7 +27,9 @@ export const AgentStartSessionRequestSchema = z.object({
   maxSteps: z.number().int().positive().max(200).default(50),
   // 单会话成本硬顶（USD）；null = 不设预算
   budgetUsd: z.number().positive().nullable().default(null),
-  // 会话启动时挂载的 stdio MCP servers（bb-browser 等）
+  // 会话启动时启用的 bb-browser 选品站点 id（在插件页开关，注册为 site:<id> 工具）
+  enabledSites: z.array(z.string()).default([]),
+  // 会话启动时挂载的 stdio MCP servers（DIY 用户自挂的自定义 server）
   mcpServers: z.array(AgentMcpServerConfigSchema).default([]),
 });
 export type AgentStartSessionRequest = z.infer<typeof AgentStartSessionRequestSchema>;

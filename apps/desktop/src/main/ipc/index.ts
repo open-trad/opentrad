@@ -4,6 +4,7 @@
 import type { CCManager } from "@opentrad/cc-adapter";
 import type { AgentService } from "../services/agent-service";
 import type { DetectLoopRegistry } from "../services/cc-detect-loop";
+import type { ConnectorService } from "../services/connector-service";
 import type { SafeStorageCredentialStore } from "../services/credential-store";
 import type { DbServices } from "../services/db";
 import type { McpConfigWriter } from "../services/mcp-writer";
@@ -12,6 +13,7 @@ import type { IpcRiskGatePrompter } from "../services/risk-gate";
 import { registerAgentHandlers } from "./agent";
 import { registerAuthHandlers } from "./auth";
 import { registerCcHandlers } from "./cc";
+import { registerConnectorHandlers } from "./connector";
 import { registerInstalledSkillHandlers } from "./installed-skill";
 import { registerInstallerHandlers } from "./installer";
 import { registerPtyHandlers } from "./pty";
@@ -29,11 +31,13 @@ export interface IpcDeps {
   riskGatePrompter: IpcRiskGatePrompter;
   agent: AgentService;
   credentials: SafeStorageCredentialStore;
+  connector: ConnectorService;
 }
 
 export function registerIpcHandlers(deps: IpcDeps): void {
   registerCcHandlers({ manager: deps.manager, db: deps.db, mcpWriter: deps.mcpWriter });
   registerAgentHandlers({ agent: deps.agent, credentials: deps.credentials });
+  registerConnectorHandlers({ connector: deps.connector });
   registerSessionHandlers(deps.db);
   registerSettingsHandlers(deps.db);
   registerInstalledSkillHandlers(deps.db);

@@ -44,6 +44,9 @@ importers:
       '@opentrad/cc-adapter':
         specifier: workspace:^
         version: link:../../packages/cc-adapter
+      '@opentrad/connectors':
+        specifier: workspace:^
+        version: link:../../packages/connectors
       '@opentrad/model-providers':
         specifier: workspace:^
         version: link:../../packages/model-providers
@@ -180,6 +183,9 @@ importers:
       '@opentrad/shared':
         specifier: workspace:^
         version: link:../shared
+      '@opentrad/tool-host':
+        specifier: workspace:^
+        version: link:../tool-host
       zod:
         specifier: ^4.3.6
         version: 4.3.6

@@ -10,6 +10,7 @@ import { app, BrowserWindow, dialog, safeStorage } from "electron";
 import { registerIpcHandlers } from "./ipc";
 import { AgentService } from "./services/agent-service";
 import { DetectLoopRegistry } from "./services/cc-detect-loop";
+import { ConnectorService } from "./services/connector-service";
 import { SafeStorageCredentialStore } from "./services/credential-store";
 import { createDbServices, type DbServices, getIpcSocketPath } from "./services/db";
 import { createIpcBridgeHandlers } from "./services/ipc-bridge-handlers";
@@ -47,6 +48,8 @@ let riskGateBundle: RiskGateBundle | undefined;
 // M0 spike（重启方向）：自建 agent loop 的服务与 safeStorage 凭证仓
 let agentService: AgentService | undefined;
 let credentialStore: SafeStorageCredentialStore | undefined;
+// M0.5：bb-browser 选品连接器服务
+let connectorService: ConnectorService | undefined;
 // 主窗口引用,RiskGate UserPrompter 通过 getMainWindow getter 拿
 let mainWindow: BrowserWindow | undefined;
 
@@ -165,6 +168,8 @@ app.whenReady().then(() => {
     credentials: credentialStore,
     gate: riskGateBundle.gate,
   });
+  // M0.5：bb-browser 选品连接器服务（预检 + 启用站点持久化）
+  connectorService = new ConnectorService(dbServices.settings);
 
   registerIpcHandlers({
     manager: ccManager,
@@ -175,6 +180,7 @@ app.whenReady().then(() => {
     riskGatePrompter: riskGateBundle.prompter,
     agent: agentService,
     credentials: credentialStore,
+    connector: connectorService,
   });
   mainWindow = createMainWindow();
 

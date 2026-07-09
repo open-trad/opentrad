@@ -61,6 +61,15 @@ export const IpcChannels = {
   AgentProfilesDelete: "agent:profiles:delete",
   AgentCredentialsSet: "agent:credentials:set",
   AgentCredentialsDelete: "agent:credentials:delete",
+  // -------- connector domain（bb-browser 选品站点连接器 + 预检，M0.5） --------
+  // 预检 + 站点启用态（渲染插件页）
+  ConnectorStatus: "connector:status",
+  // 启用/停用一个站点（持久化到 settings）
+  ConnectorSetEnabled: "connector:set-enabled",
+  // 一键启动浏览器服务（bb-browser daemon）
+  ConnectorDaemonStart: "connector:daemon-start",
+  // 在受管浏览器打开站点登录页
+  ConnectorOpenLogin: "connector:open-login",
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];
