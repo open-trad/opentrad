@@ -37,6 +37,7 @@ function getManagedDescendants(dataRoot: string, paths: HermesPaths): string[] {
     hostPath.join(dataRoot, "runtimes", "hermes"),
     paths.runtimeRoot,
     paths.hermesHome,
+    paths.gatewayCwd,
   ];
 }
 
@@ -64,6 +65,7 @@ describe("Hermes managed paths", () => {
     expect(paths).toEqual({
       runtimeRoot: "/var/lib/opentrad/runtimes/hermes/0.18.2",
       hermesHome: "/var/lib/opentrad/hermes",
+      gatewayCwd: "/var/lib/opentrad/hermes/gateway-cwd",
       pythonExecutable: "/var/lib/opentrad/runtimes/hermes/0.18.2/venv/bin/python3",
     });
   });
@@ -74,6 +76,7 @@ describe("Hermes managed paths", () => {
     expect(paths).toEqual({
       runtimeRoot: win32.join("C:\\OpenTrad\\Data", "runtimes", "hermes", "0.18.2"),
       hermesHome: win32.join("C:\\OpenTrad\\Data", "hermes"),
+      gatewayCwd: win32.join("C:\\OpenTrad\\Data", "hermes", "gateway-cwd"),
       pythonExecutable: win32.join(
         "C:\\OpenTrad\\Data",
         "runtimes",
@@ -145,6 +148,24 @@ describe("Hermes managed paths", () => {
     );
   });
 
+  it("rejects a symlink used as the gateway working directory", async () => {
+    const sandbox = await createTempDir();
+    const dataRoot = hostPath.join(sandbox, "data");
+    const outside = hostPath.join(sandbox, "outside");
+    await Promise.all([
+      mkdir(hostPath.join(dataRoot, "hermes"), { recursive: true }),
+      mkdir(outside),
+    ]);
+    await createDirectorySymlink(outside, hostPath.join(dataRoot, "hermes", "gateway-cwd"));
+    const paths = resolveHostHermesPaths(dataRoot);
+
+    await expect(ensureHermesStateDirs(paths, { dataRoot })).rejects.toMatchObject({
+      name: "HermesPathSecurityError",
+      code: "HERMES_PATH_SECURITY",
+      message: expect.stringMatching(/symbolic link/i),
+    });
+  });
+
   it("rejects a symlink in an intermediate managed component", async () => {
     const sandbox = await createTempDir();
     const dataRoot = hostPath.join(sandbox, "data");
@@ -192,6 +213,24 @@ describe("Hermes managed paths", () => {
     await expect(access(outsideRuntime)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("rejects an injected gateway cwd that is not nested under HERMES_HOME", async () => {
+    const sandbox = await createTempDir();
+    const dataRoot = hostPath.join(sandbox, "data");
+    await mkdir(dataRoot);
+    const outsideHermesHome = hostPath.join(dataRoot, "untrusted-gateway-cwd");
+    const paths = {
+      ...resolveHostHermesPaths(dataRoot),
+      gatewayCwd: outsideHermesHome,
+    };
+
+    await expect(ensureHermesStateDirs(paths, { dataRoot })).rejects.toMatchObject({
+      name: "HermesPathSecurityError",
+      code: "HERMES_PATH_SECURITY",
+      message: expect.stringMatching(/gateway.*HERMES_HOME/i),
+    });
+    await expect(access(outsideHermesHome)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("rejects a non-directory in a managed path", async () => {
     const dataRoot = await createTempDir();
     await mkdir(hostPath.join(dataRoot, "runtimes"));
@@ -227,7 +266,10 @@ describe("Hermes managed paths", () => {
   it("creates managed directories on Windows without claiming POSIX mode bits", async () => {
     const dataRoot = await createTempDir();
     const paths = resolveHostHermesPaths(dataRoot);
-    await Promise.all([mkdir(paths.runtimeRoot, { recursive: true }), mkdir(paths.hermesHome)]);
+    await Promise.all([
+      mkdir(paths.runtimeRoot, { recursive: true }),
+      mkdir(paths.gatewayCwd, { recursive: true }),
+    ]);
     const managedDirs = [dataRoot, ...getManagedDescendants(dataRoot, paths)];
     if (!realHostIsWindows) {
       await Promise.all(managedDirs.map((dir) => chmod(dir, 0o755)));
@@ -248,7 +290,10 @@ describe("Hermes managed paths", () => {
   it.skipIf(realHostIsWindows)("does not let a caller disable host POSIX hardening", async () => {
     const dataRoot = await createTempDir();
     const paths = resolveHostHermesPaths(dataRoot);
-    await Promise.all([mkdir(paths.runtimeRoot, { recursive: true }), mkdir(paths.hermesHome)]);
+    await Promise.all([
+      mkdir(paths.runtimeRoot, { recursive: true }),
+      mkdir(paths.gatewayCwd, { recursive: true }),
+    ]);
     const managedDirs = [dataRoot, ...getManagedDescendants(dataRoot, paths)];
     await Promise.all(managedDirs.map((dir) => chmod(dir, 0o755)));
 

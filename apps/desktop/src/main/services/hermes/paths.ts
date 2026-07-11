@@ -8,6 +8,7 @@ export type HermesPlatform = "darwin" | "linux" | "win32";
 export interface HermesPaths {
   readonly runtimeRoot: string;
   readonly hermesHome: string;
+  readonly gatewayCwd: string;
   readonly pythonExecutable: string;
 }
 
@@ -28,16 +29,17 @@ export function resolveHermesPaths(dataRoot: string, platform: HermesPlatform): 
   const path = platform === "win32" ? win32 : posix;
   const runtimeRoot = path.join(dataRoot, "runtimes", "hermes", HERMES_AGENT_VERSION);
   const hermesHome = path.join(dataRoot, "hermes");
+  const gatewayCwd = path.join(hermesHome, "gateway-cwd");
   const pythonExecutable =
     platform === "win32"
       ? path.join(runtimeRoot, "venv", "Scripts", "python.exe")
       : path.join(runtimeRoot, "venv", "bin", "python3");
 
-  return { runtimeRoot, hermesHome, pythonExecutable };
+  return { runtimeRoot, hermesHome, gatewayCwd, pythonExecutable };
 }
 
 export async function ensureHermesStateDirs(
-  paths: Pick<HermesPaths, "runtimeRoot" | "hermesHome">,
+  paths: Pick<HermesPaths, "runtimeRoot" | "hermesHome" | "gatewayCwd">,
   options: EnsureHermesStateDirsOptions,
 ): Promise<void> {
   if (!isAbsolute(options.dataRoot)) {
@@ -45,7 +47,18 @@ export async function ensureHermesStateDirs(
   }
 
   const dataRoot = resolve(options.dataRoot);
-  const targets = [paths.runtimeRoot, paths.hermesHome].map((target) => {
+  const normalizedHermesHome = resolve(paths.hermesHome);
+  const normalizedGatewayCwd = resolve(paths.gatewayCwd);
+  const gatewayRelativeToHome = relative(normalizedHermesHome, normalizedGatewayCwd);
+  if (
+    gatewayRelativeToHome === "" ||
+    gatewayRelativeToHome === ".." ||
+    gatewayRelativeToHome.startsWith(`..${sep}`) ||
+    isAbsolute(gatewayRelativeToHome)
+  ) {
+    throw new HermesPathSecurityError("gateway cwd must be nested under HERMES_HOME");
+  }
+  const targets = [paths.runtimeRoot, paths.hermesHome, paths.gatewayCwd].map((target) => {
     if (!isAbsolute(target)) {
       throw new HermesPathSecurityError("managed path must be absolute");
     }

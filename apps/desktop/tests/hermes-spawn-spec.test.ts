@@ -12,7 +12,8 @@ describe("createHermesGatewaySpawnSpec", () => {
     expect(HERMES_GATEWAY_MODULE).toBe("tui_gateway.entry");
     expect(spec.command).toBe(paths.pythonExecutable);
     expect(spec.args).toEqual(["-u", "-m", "tui_gateway.entry"]);
-    expect(spec.cwd).toBe(paths.runtimeRoot);
+    expect(spec.cwd).toBe(paths.gatewayCwd);
+    expect(spec.cwd).not.toBe(paths.runtimeRoot);
     expect(spec.env).toMatchObject({
       HERMES_HOME: paths.hermesHome,
       PYTHONUNBUFFERED: "1",

@@ -1,7 +1,7 @@
 import { HERMES_GATEWAY_MODULE } from "./constants";
 import type { HermesPaths } from "./paths";
 
-const ALLOWED_ENV_KEYS = new Set([
+export const HERMES_GATEWAY_ALLOWED_ENV_KEYS = [
   "PATH",
   "HOME",
   "TMPDIR",
@@ -10,7 +10,9 @@ const ALLOWED_ENV_KEYS = new Set([
   "LC_CTYPE",
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
-]);
+] as const;
+const ALLOWED_ENV_KEYS = new Set<string>(HERMES_GATEWAY_ALLOWED_ENV_KEYS);
+const REQUIRED_GATEWAY_ENV_KEYS = new Set(["HERMES_HOME", "PYTHONUNBUFFERED"]);
 
 export interface HermesGatewaySpawnSpec {
   readonly command: string;
@@ -45,7 +47,13 @@ export function createHermesGatewaySpawnSpec(
   return {
     command: paths.pythonExecutable,
     args: ["-u", "-m", HERMES_GATEWAY_MODULE],
-    cwd: paths.runtimeRoot,
+    cwd: paths.gatewayCwd,
     env,
   };
+}
+
+export function isHermesGatewaySpawnEnvKeyAllowed(key: string, platform: NodeJS.Platform): boolean {
+  if (REQUIRED_GATEWAY_ENV_KEYS.has(key)) return true;
+  if (platform === "win32" && key !== key.toUpperCase()) return false;
+  return ALLOWED_ENV_KEYS.has(key);
 }
