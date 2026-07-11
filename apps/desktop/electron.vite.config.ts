@@ -16,6 +16,7 @@ const OPENTRAD_WORKSPACE_DEPS = [
   "@opentrad/stream-parser",
   "@opentrad/cc-adapter",
   "@opentrad/risk-gate",
+  "@opentrad/runtime-adapter",
   "@opentrad/skill-runtime",
   "@opentrad/browser-tools",
   "@opentrad/agent-core",

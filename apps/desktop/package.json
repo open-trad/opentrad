@@ -27,6 +27,7 @@
     "@opentrad/connectors": "workspace:^",
     "@opentrad/model-providers": "workspace:^",
     "@opentrad/risk-gate": "workspace:^",
+    "@opentrad/runtime-adapter": "workspace:^",
     "@opentrad/shared": "workspace:^",
     "@opentrad/skill-runtime": "workspace:^",
     "@opentrad/tool-host": "workspace:^",
