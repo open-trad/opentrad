@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import io
 import importlib.util
 import json
 import os
@@ -13,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -74,6 +76,26 @@ def find_supported_test_python() -> str | None:
         }:
             return candidate
     return None
+
+
+def rpc_line(
+    method: str,
+    *,
+    request_id: object = 1,
+    params: dict[str, object] | None = None,
+) -> bytes:
+    return (
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": {} if params is None else params,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
 
 
 class CapabilityParsingTests(unittest.TestCase):
@@ -958,6 +980,728 @@ os.close(outside_fd)
             self.assertFalse(rename_target.exists())
             self.assertTrue(rename_source.exists())
             self.assertEqual(unlink_target.read_text(encoding="utf-8"), "keep")
+
+
+class SafeJsonTransportTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.launcher = load_launcher()
+
+    def capability(self):
+        now = int(time.time())
+        return self.launcher.parse_capability(
+            valid_capability(expiresAt=now + 30),
+            now=now,
+        )
+
+    def test_compacts_redacts_and_canonicalizes_error_responses(self) -> None:
+        output = io.BytesIO()
+        capability = self.capability()
+        transport = self.launcher.SafeJsonTransport(output, capability)
+
+        written = transport.write_frame(
+            {
+                "jsonrpc": "2.0",
+                "id": f"prefix-{CANARY}-suffix",
+                "error": {
+                    "code": -32603,
+                    "message": f"server exploded with {CANARY}",
+                    "data": {"secret": CANARY},
+                },
+                "nested": [f"value-{CANARY}"],
+            }
+        )
+
+        self.assertTrue(written)
+        wire = output.getvalue()
+        self.assertTrue(wire.endswith(b"\n"))
+        self.assertNotIn(CANARY.encode(), wire)
+        self.assertNotIn(b"server exploded", wire)
+        self.assertNotIn(b'": ', wire)
+        self.assertNotIn(b", ", wire)
+        decoded = json.loads(wire)
+        self.assertEqual(decoded["id"], "prefix-<redacted>-suffix")
+        self.assertEqual(
+            decoded["error"],
+            {"code": -32603, "message": "Internal error"},
+        )
+        self.assertEqual(decoded["nested"], ["value-<redacted>"])
+        self.assertNotIn(CANARY, repr(capability))
+        self.assertNotIn(CANARY, repr(transport))
+
+    def test_preserves_safe_application_error_codes_with_fixed_messages(self) -> None:
+        output = io.BytesIO()
+        transport = self.launcher.SafeJsonTransport(output, self.capability())
+
+        self.assertTrue(
+            transport.write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": 5032, "message": f"private {CANARY}"},
+                }
+            )
+        )
+        self.assertTrue(
+            transport.write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "error": {"code": -32602, "message": f"private {CANARY}"},
+                }
+            )
+        )
+        self.assertTrue(
+            transport.write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "error": {
+                        "code": self.launcher.MAX_SAFE_JSON_INTEGER + 1,
+                        "message": f"private {CANARY}",
+                    },
+                }
+            )
+        )
+
+        frames = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(frames[0]["error"], {"code": 5032, "message": "Server error"})
+        self.assertEqual(
+            frames[1]["error"],
+            {"code": -32602, "message": "Invalid params"},
+        )
+        self.assertEqual(
+            frames[2]["error"],
+            {"code": -32603, "message": "Internal error"},
+        )
+        self.assertNotIn(CANARY.encode(), output.getvalue())
+
+    def test_returns_false_for_oversize_unserializable_and_write_failures(self) -> None:
+        capability = self.capability()
+        oversized_output = io.BytesIO()
+        oversized = self.launcher.SafeJsonTransport(oversized_output, capability)
+        self.assertFalse(
+            oversized.write_frame(
+                {"payload": "x" * self.launcher.MAX_NDJSON_FRAME_BYTES}
+            )
+        )
+        self.assertEqual(oversized_output.getvalue(), b"")
+
+        cyclic: dict[str, object] = {}
+        cyclic["self"] = cyclic
+        self.assertFalse(oversized.write_frame(cyclic))
+        self.assertEqual(oversized_output.getvalue(), b"")
+
+        class FailingBinaryOutput:
+            def write(self, _data: bytes) -> int:
+                raise OSError(CANARY)
+
+            def flush(self) -> None:
+                raise AssertionError("flush must not follow a failed write")
+
+        failing = self.launcher.SafeJsonTransport(FailingBinaryOutput(), capability)
+        self.assertFalse(failing.write_frame({"ok": True}))
+
+    def test_concurrent_writers_never_interleave_frames(self) -> None:
+        class SlowPartialBinaryOutput:
+            def __init__(self) -> None:
+                self.data = bytearray()
+
+            def write(self, data: bytes) -> int:
+                chunk = bytes(data[:3])
+                time.sleep(0)
+                self.data.extend(chunk)
+                return len(chunk)
+
+            def flush(self) -> None:
+                time.sleep(0)
+
+        output = SlowPartialBinaryOutput()
+        transport = self.launcher.SafeJsonTransport(output, self.capability())
+        outcomes: list[bool] = []
+        outcomes_lock = threading.Lock()
+
+        def write(index: int) -> None:
+            result = transport.write_frame(
+                {"jsonrpc": "2.0", "id": index, "result": {"value": index}}
+            )
+            with outcomes_lock:
+                outcomes.append(result)
+
+        threads = [threading.Thread(target=write, args=(index,)) for index in range(24)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(outcomes, [True] * 24)
+        frames = bytes(output.data).splitlines()
+        self.assertEqual(len(frames), 24)
+        observed = {json.loads(frame)["id"] for frame in frames}
+        self.assertEqual(observed, set(range(24)))
+
+    def test_capture_stdout_uses_the_binary_buffer(self) -> None:
+        binary = io.BytesIO()
+
+        class TextStdout:
+            buffer = binary
+
+        with mock.patch.object(self.launcher.sys, "stdout", TextStdout()):
+            transport = self.launcher.SafeJsonTransport.capture_stdout(self.capability())
+            self.assertTrue(transport.write_frame({"captured": True}))
+
+        self.assertEqual(json.loads(binary.getvalue()), {"captured": True})
+
+    def test_official_write_and_idempotent_logical_close_are_thread_safe(self) -> None:
+        output = io.BytesIO()
+        transport = self.launcher.SafeJsonTransport(output, self.capability())
+
+        self.assertTrue(transport.write({"before": True}))
+        before_close = output.getvalue()
+        transport.close()
+        transport.close()
+
+        self.assertFalse(transport.write({"after": True}))
+        self.assertFalse(transport.write_frame({"afterFrame": True}))
+        self.assertEqual(output.getvalue(), before_close)
+        self.assertFalse(output.closed)
+
+
+class NdjsonLoopTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.launcher = load_launcher()
+
+    def capability(self):
+        now = int(time.time())
+        return self.launcher.parse_capability(
+            valid_capability(expiresAt=now + 30),
+            now=now,
+        )
+
+    def run_loop(
+        self,
+        input_bytes: bytes,
+        dispatcher,
+        *,
+        output=None,
+        shutdown=None,
+    ):
+        binary_output = io.BytesIO() if output is None else output
+        transport = self.launcher.SafeJsonTransport(binary_output, self.capability())
+        shutdown_calls: list[str] = []
+
+        def default_shutdown() -> None:
+            shutdown_calls.append("shutdown")
+
+        result = self.launcher.run_ndjson_loop(
+            io.BytesIO(input_bytes),
+            transport,
+            dispatcher,
+            default_shutdown if shutdown is None else shutdown,
+        )
+        frames = [json.loads(line) for line in binary_output.getvalue().splitlines()]
+        return result, frames, shutdown_calls
+
+    def test_uses_bounded_binary_readline_skips_blanks_and_shuts_down_once_at_eof(self) -> None:
+        class RecordingInput(io.BytesIO):
+            def __init__(self, initial: bytes) -> None:
+                super().__init__(initial)
+                self.sizes: list[int] = []
+
+            def readline(self, size: int = -1) -> bytes:
+                self.sizes.append(size)
+                return super().readline(size)
+
+        input_stream = RecordingInput(
+            b"\n  \r\n"
+            + rpc_line("session.create", request_id=7, params={"cwd": "/workspace"})
+        )
+        output = io.BytesIO()
+        transport = self.launcher.SafeJsonTransport(output, self.capability())
+        calls: list[dict[str, object]] = []
+        shutdown_calls: list[str] = []
+
+        def dispatcher(request: dict[str, object]):
+            calls.append(request)
+            return {
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {"created": True},
+            }
+
+        result = self.launcher.run_ndjson_loop(
+            input_stream,
+            transport,
+            dispatcher,
+            lambda: shutdown_calls.append("shutdown"),
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(
+            input_stream.sizes,
+            [self.launcher.MAX_NDJSON_FRAME_BYTES + 1] * 4,
+        )
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "session.create",
+                    "params": {"cwd": "/workspace"},
+                }
+            ],
+        )
+        self.assertEqual(shutdown_calls, ["shutdown"])
+        frames = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(
+            frames[0],
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {"type": "gateway.ready", "payload": {"skin": {}}},
+            },
+        )
+        self.assertEqual(
+            frames[1],
+            {"jsonrpc": "2.0", "id": 7, "result": {"created": True}},
+        )
+
+    def test_whitelist_is_exact_and_unknown_methods_never_reach_dispatcher(self) -> None:
+        expected = {
+            "session.create",
+            "session.resume",
+            "session.status",
+            "session.close",
+            "session.interrupt",
+            "prompt.submit",
+            "approval.respond",
+        }
+        self.assertEqual(set(self.launcher.ALLOWED_RPC_METHODS), expected)
+        calls: list[dict[str, object]] = []
+
+        def dispatcher(request: dict[str, object]):
+            calls.append(request)
+            return {"jsonrpc": "2.0", "id": request["id"], "result": None}
+
+        result, frames, shutdown_calls = self.run_loop(
+            rpc_line("terminal.execute", request_id="unknown")
+            + rpc_line("session.status", request_id="known"),
+            dispatcher,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "id": "known",
+                    "method": "session.status",
+                    "params": {},
+                }
+            ],
+        )
+        self.assertEqual(shutdown_calls, ["shutdown"])
+        self.assertEqual(frames[1]["id"], "unknown")
+        self.assertEqual(
+            frames[1]["error"],
+            {"code": -32601, "message": "Method not found"},
+        )
+        self.assertEqual(frames[2], {"jsonrpc": "2.0", "id": "known", "result": None})
+
+        crafted = self.launcher.RpcRequest(
+            request_id=9,
+            method="terminal.execute",
+            params={},
+        )
+        direct = self.launcher.dispatch_rpc_request(crafted, dispatcher)
+        self.assertEqual(
+            direct["error"],
+            {"code": -32601, "message": "Method not found"},
+        )
+        self.assertEqual(len(calls), 1)
+
+        original = self.launcher.RpcRequest(
+            request_id=10,
+            method="session.status",
+            params={"nested": {"value": 1}},
+        )
+
+        def mutating_dispatcher(request: dict[str, object]):
+            request["method"] = "terminal.execute"
+            request_params = request["params"]
+            assert isinstance(request_params, dict)
+            nested = request_params["nested"]
+            assert isinstance(nested, dict)
+            nested["value"] = 2
+            return {"jsonrpc": "2.0", "id": request["id"], "result": {}}
+
+        self.launcher.dispatch_rpc_request(original, mutating_dispatcher)
+        self.assertEqual(original.method, "session.status")
+        self.assertEqual(original.params, {"nested": {"value": 1}})
+
+    def test_parse_duplicate_and_invalid_requests_use_fixed_errors(self) -> None:
+        duplicate = (
+            b'{"jsonrpc":"2.0","id":1,"id":2,'
+            b'"method":"session.status","params":{}}\n'
+        )
+        invalid_requests = [
+            b"[]\n",
+            b'{"jsonrpc":"1.0","id":1,"method":"session.status","params":{}}\n',
+            rpc_line("session.status", request_id=True),
+            rpc_line("session.status", request_id=9_007_199_254_740_992),
+            rpc_line("session.status", request_id="x" * 129),
+            b'{"jsonrpc":"2.0","id":1,"method":"","params":{}}\n',
+            b'{"jsonrpc":"2.0","id":1,"method":"session.status","params":[]}\n',
+        ]
+        calls: list[str] = []
+        result, frames, _ = self.run_loop(
+            b"\xff\n" + b"{not-json}\n" + duplicate + b"".join(invalid_requests),
+            lambda request: calls.append(str(request["method"])),
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(calls, [])
+        errors = [frame["error"] for frame in frames[1:]]
+        self.assertEqual(
+            errors[:3],
+            [{"code": -32700, "message": "Parse error"}] * 3,
+        )
+        self.assertEqual(
+            errors[3:],
+            [{"code": -32600, "message": "Invalid Request"}] * len(invalid_requests),
+        )
+        self.assertTrue(all(frame["id"] is None for frame in frames[1:]))
+
+    def test_rejects_unsafe_and_nonfinite_json_numbers_without_crashing(self) -> None:
+        huge_integer = b"9" * 5_000
+        requests = (
+            b'{"jsonrpc":"2.0","id":1,"method":"session.status","params":{"n":'
+            + huge_integer
+            + b"}}\n"
+            + b'{"jsonrpc":"2.0","id":2,"method":"session.status","params":{"n":9007199254740992}}\n'
+            + b'{"jsonrpc":"2.0","id":3,"method":"session.status","params":{"n":1e309}}\n'
+            + b'{"jsonrpc":"2.0","id":4,"method":"session.status","params":{"n":9007199254740992.0}}\n'
+            + b'{"jsonrpc":"2.0","id":5,"method":"session.status","params":{"n":1.25}}\n'
+        )
+        calls: list[dict[str, object]] = []
+
+        def dispatcher(request: dict[str, object]):
+            calls.append(request)
+            return {"jsonrpc": "2.0", "id": request["id"], "result": {}}
+
+        result, frames, shutdown_calls = self.run_loop(requests, dispatcher)
+
+        self.assertTrue(result)
+        self.assertEqual(shutdown_calls, ["shutdown"])
+        self.assertEqual(
+            [frame["error"] for frame in frames[1:5]],
+            [{"code": -32700, "message": "Parse error"}] * 4,
+        )
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "session.status",
+                    "params": {"n": 1.25},
+                }
+            ],
+        )
+        self.assertEqual(frames[5], {"jsonrpc": "2.0", "id": 5, "result": {}})
+
+    def test_rejects_lone_surrogates_in_nested_keys_and_values(self) -> None:
+        requests = (
+            b'{"jsonrpc":"2.0","id":1,"method":"session.status","params":{"value":"\\ud800"}}\n'
+            b'{"jsonrpc":"2.0","id":2,"method":"session.status","params":{"\\udfff":true}}\n'
+            + rpc_line("session.status", request_id=3, params={"value": "正常"})
+        )
+        calls: list[dict[str, object]] = []
+
+        def dispatcher(request: dict[str, object]):
+            calls.append(request)
+            return {"jsonrpc": "2.0", "id": request["id"], "result": {}}
+
+        result, frames, shutdown_calls = self.run_loop(requests, dispatcher)
+
+        self.assertTrue(result)
+        self.assertEqual(shutdown_calls, ["shutdown"])
+        self.assertEqual(
+            [frame["error"] for frame in frames[1:3]],
+            [{"code": -32700, "message": "Parse error"}] * 2,
+        )
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session.status",
+                    "params": {"value": "正常"},
+                }
+            ],
+        )
+
+    def test_enforces_exact_nesting_limit_and_handles_parser_recursion(self) -> None:
+        def deep_request(request_id: int, depth: int) -> bytes:
+            nested = b"[" * depth + b"0" + b"]" * depth
+            return (
+                b'{"jsonrpc":"2.0","id":'
+                + str(request_id).encode("ascii")
+                + b',"method":"session.status","params":{"deep":'
+                + nested
+                + b"}}\n"
+            )
+
+        calls: list[int] = []
+        result, frames, shutdown_calls = self.run_loop(
+            deep_request(1, self.launcher.MAX_JSON_NESTING_DEPTH)
+            + deep_request(2, self.launcher.MAX_JSON_NESTING_DEPTH + 1)
+            + deep_request(3, 600)
+            + rpc_line("session.status", request_id=4),
+            lambda request: calls.append(int(request["id"])),
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(calls, [1, 4])
+        self.assertEqual(shutdown_calls, ["shutdown"])
+        self.assertEqual(
+            frames[1:],
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": "Parse error"},
+                }
+            ]
+            * 2,
+        )
+
+    def test_server_dispatch_is_bound_through_a_two_argument_closure(self) -> None:
+        emitted = threading.Event()
+        allow_late_write = threading.Event()
+        request_line = rpc_line("session.status", request_id=8)
+
+        class CoordinatedInput:
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def readline(self, _size: int) -> bytes:
+                self.reads += 1
+                if self.reads == 1:
+                    return request_line
+                self.assert_async_emission_completed()
+                return b""
+
+            @staticmethod
+            def assert_async_emission_completed() -> None:
+                if not emitted.wait(timeout=2):
+                    raise AssertionError("async server emission did not complete")
+
+        input_stream = CoordinatedInput()
+        output = io.BytesIO()
+        transport = self.launcher.SafeJsonTransport(output, self.capability())
+        calls: list[tuple[dict[str, object], object]] = []
+        async_outcomes: list[bool] = []
+        late_outcomes: list[bool] = []
+        workers: list[threading.Thread] = []
+
+        class FakeServer:
+            def dispatch(
+                self,
+                request: dict[str, object],
+                bound_transport=None,
+            ):
+                calls.append((request, bound_transport))
+
+                def emit_async_response() -> None:
+                    async_outcomes.append(
+                        bound_transport.write(
+                            {"jsonrpc": "2.0", "id": request["id"], "result": {}}
+                        )
+                    )
+                    emitted.set()
+
+                def try_late_event() -> None:
+                    allow_late_write.wait(timeout=2)
+                    late_outcomes.append(
+                        bound_transport.write(
+                            {
+                                "jsonrpc": "2.0",
+                                "method": "event",
+                                "params": {"type": "late"},
+                            }
+                        )
+                    )
+
+                workers.extend(
+                    [
+                        threading.Thread(target=emit_async_response),
+                        threading.Thread(target=try_late_event),
+                    ]
+                )
+                for worker in workers:
+                    worker.start()
+                return None
+
+        dispatcher = self.launcher.bind_server_dispatch(FakeServer(), transport)
+        result = self.launcher.run_ndjson_loop(
+            input_stream,
+            transport,
+            dispatcher,
+            lambda: None,
+        )
+        allow_late_write.set()
+        for worker in workers:
+            worker.join(timeout=2)
+
+        self.assertTrue(result)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0]["method"], "session.status")
+        self.assertIs(calls[0][1], transport)
+        self.assertEqual(async_outcomes, [True])
+        self.assertEqual(late_outcomes, [False])
+        frames = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(frames[1], {"jsonrpc": "2.0", "id": 8, "result": {}})
+
+    def test_loop_closes_owned_transport_after_shutdown_on_every_exit(self) -> None:
+        class TrackingTransport:
+            def __init__(self, *, ready_succeeds: bool = True) -> None:
+                self.ready_succeeds = ready_succeeds
+                self.write_calls = 0
+                self.close_calls = 0
+                self.order: list[str] = []
+
+            def write_frame(self, _frame: object) -> bool:
+                self.write_calls += 1
+                return self.ready_succeeds or self.write_calls > 1
+
+            def close(self) -> None:
+                self.close_calls += 1
+                self.order.append("close")
+
+        class ReadFailure:
+            def readline(self, _size: int) -> bytes:
+                raise OSError("read failed")
+
+        cases = [
+            (io.BytesIO(b""), TrackingTransport()),
+            (io.BytesIO(b""), TrackingTransport(ready_succeeds=False)),
+            (ReadFailure(), TrackingTransport()),
+            (
+                io.BytesIO(b"x" * (self.launcher.MAX_NDJSON_FRAME_BYTES + 1)),
+                TrackingTransport(),
+            ),
+        ]
+
+        for input_stream, transport in cases:
+            with self.subTest(input_type=type(input_stream).__name__, writes=transport.write_calls):
+                def shutdown() -> None:
+                    transport.order.append("shutdown")
+
+                self.launcher.run_ndjson_loop(
+                    input_stream,
+                    transport,
+                    lambda _request: None,
+                    shutdown,
+                )
+                self.assertEqual(transport.close_calls, 1)
+                self.assertEqual(transport.order, ["shutdown", "close"])
+
+    def test_dispatcher_none_dict_exception_and_token_output_are_safe(self) -> None:
+        calls = 0
+
+        def dispatcher(request: dict[str, object]):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return None
+            if calls == 2:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {"secret": f"before-{CANARY}-after"},
+                }
+            raise RuntimeError(f"dispatcher exploded {CANARY}")
+
+        result, frames, _ = self.run_loop(
+            rpc_line("session.status", request_id=1)
+            + rpc_line("session.status", request_id=2)
+            + rpc_line("session.status", request_id=3),
+            dispatcher,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(
+            frames[1],
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {"secret": "before-<redacted>-after"},
+            },
+        )
+        self.assertEqual(
+            frames[2],
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "error": {"code": -32603, "message": "Internal error"},
+            },
+        )
+        rendered = json.dumps(frames)
+        self.assertNotIn(CANARY, rendered)
+        self.assertNotIn("dispatcher exploded", rendered)
+
+    def test_oversize_input_emits_fixed_failure_terminates_and_never_dispatches(self) -> None:
+        oversized = b"x" * (self.launcher.MAX_NDJSON_FRAME_BYTES + 1)
+        calls: list[str] = []
+        result, frames, shutdown_calls = self.run_loop(
+            oversized + rpc_line("session.status", request_id=2),
+            lambda request: calls.append(str(request["method"])),
+        )
+
+        self.assertFalse(result)
+        self.assertEqual(calls, [])
+        self.assertEqual(shutdown_calls, ["shutdown"])
+        self.assertEqual(len(frames), 2)
+        self.assertEqual(
+            frames[1],
+            {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32600, "message": "Invalid Request"},
+            },
+        )
+
+    def test_ready_write_failure_terminates_without_reading_and_shutdown_runs_once(self) -> None:
+        class ExplodingInput:
+            def readline(self, _size: int) -> bytes:
+                raise AssertionError("input must not be read when ready cannot be written")
+
+        class RejectingTransport:
+            def __init__(self) -> None:
+                self.frames: list[object] = []
+
+            def write_frame(self, frame: object) -> bool:
+                self.frames.append(frame)
+                return False
+
+        transport = RejectingTransport()
+        shutdown_calls: list[str] = []
+        result = self.launcher.run_ndjson_loop(
+            ExplodingInput(),
+            transport,
+            lambda _request: (_ for _ in ()).throw(AssertionError("dispatch")),
+            lambda: shutdown_calls.append("shutdown"),
+        )
+
+        self.assertFalse(result)
+        self.assertEqual(transport.frames, [self.launcher.READY_ENVELOPE])
+        self.assertEqual(shutdown_calls, ["shutdown"])
 
 
 class SourceBoundaryTests(unittest.TestCase):

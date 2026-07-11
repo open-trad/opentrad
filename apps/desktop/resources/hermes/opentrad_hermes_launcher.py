@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import faulthandler
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -26,8 +27,9 @@ import selectors
 import socket
 import stat
 import sys
+import threading
 import time
-from typing import Callable, MutableMapping, NoReturn
+from typing import BinaryIO, Callable, MutableMapping, NoReturn, Protocol
 
 
 CAPABILITY_FD = 3
@@ -43,6 +45,35 @@ TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,512}$")
 GENERIC_REFUSAL = "OpenTrad Hermes launcher refused startup"
 GENERIC_STDERR = b"OpenTrad Hermes launcher refused startup\n"
 EX_CONFIG = 78
+MAX_NDJSON_FRAME_BYTES = 4 * 1024 * 1024
+MAX_RPC_ID_STRING_CHARACTERS = 128
+MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
+MAX_JSON_INTEGER_DIGITS = 64
+MAX_JSON_NESTING_DEPTH = 128
+ALLOWED_RPC_METHODS = frozenset(
+    {
+        "session.create",
+        "session.resume",
+        "session.status",
+        "session.close",
+        "session.interrupt",
+        "prompt.submit",
+        "approval.respond",
+    }
+)
+READY_ENVELOPE = {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {"type": "gateway.ready", "payload": {"skin": {}}},
+}
+_RPC_ERROR_MESSAGES = {
+    -32700: "Parse error",
+    -32600: "Invalid Request",
+    -32601: "Method not found",
+    -32602: "Invalid params",
+    -32603: "Internal error",
+}
+_UNKNOWN_RPC_ERROR_MESSAGE = "Server error"
 
 _SAFE_MODE_ENVIRONMENT = {
     "HERMES_SAFE_MODE": "1",
@@ -143,6 +174,161 @@ class BootstrapState:
     audit_policy: "AuditPolicy"
 
 
+@dataclass(frozen=True, slots=True)
+class RpcRequest:
+    request_id: int | str
+    method: str
+    params: dict[str, object]
+
+
+class SafeJsonTransport:
+    """Thread-safe bounded NDJSON output that never renders the capability token."""
+
+    __slots__ = ("_stream", "_token", "_write_lock", "_closed")
+
+    def __init__(self, stream: BinaryIO, capability: Capability) -> None:
+        self._stream = stream
+        self._token = capability.token
+        self._write_lock = threading.Lock()
+        self._closed = False
+
+    @classmethod
+    def capture_stdout(cls, capability: Capability) -> "SafeJsonTransport":
+        stream = getattr(sys.stdout, "buffer", None)
+        if stream is None or not callable(getattr(stream, "write", None)):
+            _reject("stdout_transport")
+        return cls(stream, capability)
+
+    def __repr__(self) -> str:
+        return f"SafeJsonTransport(max_frame_bytes={MAX_NDJSON_FRAME_BYTES})"
+
+    def write(self, payload: object) -> bool:
+        return self.write_frame(payload)
+
+    def close(self) -> None:
+        with self._write_lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._stream.flush()
+            except BaseException:
+                pass
+
+    def write_frame(self, payload: object) -> bool:
+        try:
+            safe_payload = _prepare_json_output(payload, self._token)
+            encoded = json.dumps(
+                safe_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8", errors="strict")
+            wire = encoded + b"\n"
+            if len(wire) > MAX_NDJSON_FRAME_BYTES:
+                return False
+        except BaseException:
+            return False
+
+        with self._write_lock:
+            if self._closed:
+                return False
+            try:
+                remaining = memoryview(wire)
+                while remaining:
+                    written = self._stream.write(remaining)
+                    if type(written) is not int or written <= 0 or written > len(remaining):
+                        return False
+                    remaining = remaining[written:]
+                self._stream.flush()
+                return True
+            except BaseException:
+                return False
+
+
+RpcResponse = dict[str, object] | None
+RpcDispatcher = Callable[[dict[str, object]], RpcResponse]
+
+
+class ServerDispatch(Protocol):
+    """Pinned gateway shape; its optional transport must never fall back to stdio."""
+
+    def dispatch(
+        self,
+        request: dict[str, object],
+        transport: SafeJsonTransport,
+        /,
+    ) -> RpcResponse: ...
+
+
+def bind_server_dispatch(
+    server: ServerDispatch,
+    transport: SafeJsonTransport,
+) -> RpcDispatcher:
+    """Bind the safe transport explicitly instead of passing ``server.dispatch`` raw."""
+
+    def dispatch_with_safe_transport(request: dict[str, object]) -> RpcResponse:
+        return server.dispatch(request, transport)
+
+    return dispatch_with_safe_transport
+
+
+def _prepare_json_output(payload: object, token: str) -> object:
+    sanitized = _redact_json_value(payload, token, set())
+    if (
+        isinstance(sanitized, dict)
+        and sanitized.get("jsonrpc") == "2.0"
+        and "error" in sanitized
+    ):
+        error = sanitized.get("error")
+        code, message = _normalize_rpc_error(
+            error.get("code") if isinstance(error, dict) else None
+        )
+        normalized = dict(sanitized)
+        normalized["error"] = {"code": code, "message": message}
+        return normalized
+    return sanitized
+
+
+def _normalize_rpc_error(code: object) -> tuple[int, str]:
+    if type(code) is not int or not -MAX_SAFE_JSON_INTEGER <= code <= MAX_SAFE_JSON_INTEGER:
+        code = -32603
+    return code, _RPC_ERROR_MESSAGES.get(code, _UNKNOWN_RPC_ERROR_MESSAGE)
+
+
+def _redact_json_value(value: object, token: str, active: set[int]) -> object:
+    if isinstance(value, str):
+        return value.replace(token, "<redacted>")
+    if value is None or type(value) in {bool, int, float}:
+        return value
+    if isinstance(value, dict):
+        identity = id(value)
+        if identity in active:
+            raise ValueError("cyclic JSON value")
+        active.add(identity)
+        try:
+            return {
+                (key.replace(token, "<redacted>") if isinstance(key, str) else key): _redact_json_value(
+                    item,
+                    token,
+                    active,
+                )
+                for key, item in value.items()
+            }
+        finally:
+            active.remove(identity)
+    if isinstance(value, (list, tuple)):
+        identity = id(value)
+        if identity in active:
+            raise ValueError("cyclic JSON value")
+        active.add(identity)
+        try:
+            return [_redact_json_value(item, token, active) for item in value]
+        finally:
+            active.remove(identity)
+    return value
+
+
 def _reject(code: str) -> NoReturn:
     raise LauncherRefusal(code)
 
@@ -163,6 +349,228 @@ def _pairs_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, obje
             raise _DuplicateCapabilityKey()
         result[key] = value
     return result
+
+
+class _RpcFrameError(ValueError):
+    __slots__ = ("code",)
+
+    def __init__(self, code: int) -> None:
+        super().__init__(_RPC_ERROR_MESSAGES[code])
+        self.code = code
+
+
+class _InvalidJsonValue(ValueError):
+    pass
+
+
+def _reject_json_constant(_value: str) -> NoReturn:
+    raise _InvalidJsonValue()
+
+
+def _parse_json_integer(value: str) -> int:
+    digits = value[1:] if value.startswith("-") else value
+    if len(digits) > MAX_JSON_INTEGER_DIGITS:
+        raise _InvalidJsonValue()
+    try:
+        parsed = int(value)
+    except (ValueError, OverflowError):
+        raise _InvalidJsonValue() from None
+    return parsed
+
+
+def _parse_json_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except (ValueError, OverflowError):
+        raise _InvalidJsonValue() from None
+    if not math.isfinite(parsed):
+        raise _InvalidJsonValue()
+    return parsed
+
+
+def parse_rpc_request(frame: bytes) -> RpcRequest:
+    """Parse one bounded frame into a normalized request without reflecting input."""
+
+    try:
+        text = frame.decode("utf-8", errors="strict")
+        payload = json.loads(
+            text,
+            object_pairs_hook=_pairs_without_duplicates,
+            parse_constant=_reject_json_constant,
+            parse_int=_parse_json_integer,
+            parse_float=_parse_json_float,
+        )
+    except (UnicodeDecodeError, ValueError, OverflowError, RecursionError):
+        raise _RpcFrameError(-32700) from None
+
+    if not isinstance(payload, dict) or set(payload) != {"jsonrpc", "id", "method", "params"}:
+        raise _RpcFrameError(-32600)
+    request_id = payload["id"]
+    method = payload["method"]
+    params = payload["params"]
+    if payload["jsonrpc"] != "2.0" or not _is_valid_rpc_id(request_id):
+        raise _RpcFrameError(-32600)
+    if not isinstance(method, str) or len(method) == 0 or not _is_strict_utf8(method):
+        raise _RpcFrameError(-32600)
+    if not isinstance(params, dict):
+        raise _RpcFrameError(-32600)
+    try:
+        normalized_params = _copy_json_object(params)
+    except (ValueError, RecursionError):
+        raise _RpcFrameError(-32700) from None
+    return RpcRequest(
+        request_id=request_id,
+        method=method,
+        params=normalized_params,
+    )
+
+
+def _is_valid_rpc_id(value: object) -> bool:
+    if type(value) is int:
+        return -MAX_SAFE_JSON_INTEGER <= value <= MAX_SAFE_JSON_INTEGER
+    return (
+        isinstance(value, str)
+        and len(value) <= MAX_RPC_ID_STRING_CHARACTERS
+        and _is_strict_utf8(value)
+    )
+
+
+def _is_strict_utf8(value: str) -> bool:
+    try:
+        value.encode("utf-8", errors="strict")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _copy_json_object(
+    value: dict[str, object],
+    depth: int = 0,
+) -> dict[str, object]:
+    if depth > MAX_JSON_NESTING_DEPTH:
+        raise _InvalidJsonValue()
+    copied: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not _is_strict_utf8(key):
+            raise _InvalidJsonValue()
+        copied[key] = _copy_json_value(item, depth + 1)
+    return copied
+
+
+def _copy_json_value(value: object, depth: int) -> object:
+    if value is None or type(value) is bool:
+        return value
+    if isinstance(value, str):
+        if not _is_strict_utf8(value):
+            raise _InvalidJsonValue()
+        return value
+    if type(value) is int:
+        if not -MAX_SAFE_JSON_INTEGER <= value <= MAX_SAFE_JSON_INTEGER:
+            raise _InvalidJsonValue()
+        return value
+    if type(value) is float:
+        if not math.isfinite(value) or (
+            value.is_integer() and abs(value) > MAX_SAFE_JSON_INTEGER
+        ):
+            raise _InvalidJsonValue()
+        return value
+    if isinstance(value, dict):
+        return _copy_json_object(value, depth)
+    if isinstance(value, list):
+        if depth > MAX_JSON_NESTING_DEPTH:
+            raise _InvalidJsonValue()
+        return [_copy_json_value(item, depth + 1) for item in value]
+    raise _InvalidJsonValue()
+
+
+def _rpc_error_response(code: int, request_id: int | str | None = None) -> dict[str, object]:
+    normalized_code, message = _normalize_rpc_error(code)
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {
+            "code": normalized_code,
+            "message": message,
+        },
+    }
+
+
+def dispatch_rpc_request(
+    request: RpcRequest,
+    dispatcher: RpcDispatcher,
+) -> dict[str, object] | None:
+    """Apply the second method allowlist before invoking a trusted dispatcher closure."""
+
+    if request.method not in ALLOWED_RPC_METHODS:
+        return _rpc_error_response(-32601, request.request_id)
+    try:
+        normalized_request: dict[str, object] = {
+            "jsonrpc": "2.0",
+            "id": request.request_id,
+            "method": request.method,
+            "params": _copy_json_object(request.params),
+        }
+        response = dispatcher(normalized_request)
+    except BaseException:
+        return _rpc_error_response(-32603, request.request_id)
+    if response is None:
+        return None
+    if not isinstance(response, dict):
+        return _rpc_error_response(-32603, request.request_id)
+    return response
+
+
+def run_ndjson_loop(
+    input_stream: BinaryIO,
+    transport: SafeJsonTransport,
+    dispatcher: RpcDispatcher,
+    shutdown: Callable[[], object],
+) -> bool:
+    """Run the owned loop and close output after shutdown on every exit.
+
+    ``dispatcher`` must be a unary closure returned by :func:`bind_server_dispatch`;
+    passing the pinned gateway's raw ``server.dispatch`` would select its unsafe
+    default stdio transport for asynchronous responses and events.
+    """
+
+    try:
+        if not transport.write_frame(READY_ENVELOPE):
+            return False
+        while True:
+            try:
+                frame = input_stream.readline(MAX_NDJSON_FRAME_BYTES + 1)
+            except BaseException:
+                return False
+            if not isinstance(frame, bytes):
+                return False
+            if frame == b"":
+                return True
+            if len(frame) > MAX_NDJSON_FRAME_BYTES:
+                transport.write_frame(_rpc_error_response(-32600))
+                return False
+            if frame.strip() == b"":
+                continue
+            try:
+                request = parse_rpc_request(frame)
+            except _RpcFrameError as error:
+                if not transport.write_frame(_rpc_error_response(error.code)):
+                    return False
+                continue
+            if request.method not in ALLOWED_RPC_METHODS:
+                response = _rpc_error_response(-32601, request.request_id)
+            else:
+                response = dispatch_rpc_request(request, dispatcher)
+            if response is not None and not transport.write_frame(response):
+                return False
+    finally:
+        try:
+            shutdown()
+        except BaseException:
+            pass
+        try:
+            transport.close()
+        except BaseException:
+            pass
 
 
 def parse_capability(raw: bytes, *, now: int | None = None) -> Capability:
