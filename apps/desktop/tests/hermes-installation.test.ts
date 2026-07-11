@@ -1,3 +1,4 @@
+import { inspect } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import { HERMES_AGENT_VERSION } from "../src/main/services/hermes/constants";
 import {
@@ -7,6 +8,8 @@ import {
 } from "../src/main/services/hermes/installation";
 
 const managedPython = "/opentrad/runtimes/hermes/0.18.2/venv/bin/python3";
+const versionMismatchMessage =
+  "Managed Hermes runtime unavailable: expected 0.18.2, managed runtime reports a different version";
 
 describe("verifyHermesInstallation", () => {
   it("accepts only the exact pinned hermes-agent version from the managed Python", async () => {
@@ -29,7 +32,7 @@ describe("verifyHermesInstallation", () => {
     await expect(verifyHermesInstallation(managedPython, runner)).rejects.toMatchObject({
       name: "HermesRuntimeUnavailableError",
       code: "HERMES_RUNTIME_UNAVAILABLE",
-      message: expect.stringMatching(/expected 0\.18\.2.*found 0\.18\.1/i),
+      message: versionMismatchMessage,
     });
   });
 
@@ -39,32 +42,78 @@ describe("verifyHermesInstallation", () => {
     await expect(verifyHermesInstallation(managedPython, runner)).rejects.toMatchObject({
       name: "HermesRuntimeUnavailableError",
       code: "HERMES_RUNTIME_UNAVAILABLE",
-      message: expect.stringMatching(/expected 0\.18\.2.*no version/i),
+      message: versionMismatchMessage,
     });
+  });
+
+  it("does not reflect arbitrary version output into an error", async () => {
+    const runner = vi.fn<HermesCommandRunner>().mockResolvedValue({
+      stdout: "version-output-canary\nsecond-line-canary\n",
+    });
+
+    const error = await verifyHermesInstallation(managedPython, runner).catch(
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toMatchObject({
+      name: "HermesRuntimeUnavailableError",
+      code: "HERMES_RUNTIME_UNAVAILABLE",
+      message: versionMismatchMessage,
+    });
+    expect(String(error)).not.toContain("canary");
+  });
+
+  it("does not reflect SemVer build metadata from the managed child", async () => {
+    const reportedVersion = "0.18.1+version-canary-secret";
+    const runner = vi.fn<HermesCommandRunner>().mockResolvedValue({
+      stdout: `${reportedVersion}\n`,
+    });
+
+    const error = await verifyHermesInstallation(managedPython, runner).catch(
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toMatchObject({
+      name: "HermesRuntimeUnavailableError",
+      code: "HERMES_RUNTIME_UNAVAILABLE",
+      message: versionMismatchMessage,
+    });
+    expect(String(error)).not.toContain("canary");
+    expect(String(error)).not.toContain(reportedVersion);
+    expect(String(error)).not.toContain("0.18.1+");
   });
 
   it("reports a missing managed Python without falling back to PATH", async () => {
     const missing = Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" });
     const runner = vi.fn<HermesCommandRunner>().mockRejectedValue(missing);
 
-    await expect(verifyHermesInstallation(managedPython, runner)).rejects.toMatchObject({
+    const error = await verifyHermesInstallation(managedPython, runner).catch(
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toMatchObject({
       name: "HermesRuntimeUnavailableError",
       code: "HERMES_RUNTIME_UNAVAILABLE",
       message: expect.stringMatching(/managed Hermes runtime unavailable.*version check failed/i),
-      cause: missing,
     });
+    expect(error).not.toHaveProperty("cause");
     expect(runner).toHaveBeenCalledOnce();
     expect(runner).toHaveBeenCalledWith(managedPython, ["-c", HERMES_VERSION_QUERY]);
   });
 
-  it("reports a failed version query as runtime unavailable", async () => {
-    const failure = new Error("exit code 1");
+  it("reports a failed version query without retaining an inspectable raw cause", async () => {
+    const failure = new Error("exit code 1 runner-cause-canary");
     const runner = vi.fn<HermesCommandRunner>().mockRejectedValue(failure);
 
-    await expect(verifyHermesInstallation(managedPython, runner)).rejects.toMatchObject({
+    const error = await verifyHermesInstallation(managedPython, runner).catch(
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toMatchObject({
       name: "HermesRuntimeUnavailableError",
       code: "HERMES_RUNTIME_UNAVAILABLE",
-      cause: failure,
     });
+    expect(error).not.toHaveProperty("cause");
+    expect(inspect(error, { depth: 5, showHidden: true })).not.toContain("canary");
   });
 });

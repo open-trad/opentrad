@@ -99,4 +99,58 @@ describe("createHermesGatewaySpawnSpec", () => {
     expect(spec.env.PYTHONUNBUFFERED).toBe("1");
     expect(spec.env).not.toHaveProperty("CANARY_SECRET");
   });
+
+  it("canonicalizes exact allowlisted environment names on Windows", () => {
+    const spec = createHermesGatewaySpawnSpec(
+      paths,
+      {
+        Path: "C:\\Windows\\System32",
+        home: "C:\\Users\\example",
+      },
+      "win32",
+    );
+
+    expect(spec.env).toMatchObject({
+      PATH: "C:\\Windows\\System32",
+      HOME: "C:\\Users\\example",
+    });
+    expect(spec.env).not.toHaveProperty("Path");
+    expect(spec.env).not.toHaveProperty("home");
+  });
+
+  it("rejects duplicate Windows casing for the same allowlisted key deterministically", () => {
+    expect(() =>
+      createHermesGatewaySpawnSpec(
+        paths,
+        {
+          Path: "first",
+          PATH: "second",
+        },
+        "win32",
+      ),
+    ).toThrowError(/duplicate Windows environment variable: PATH/i);
+  });
+
+  it("filters unknown mixed-case secrets on Windows", () => {
+    const spec = createHermesGatewaySpawnSpec(
+      paths,
+      {
+        pAtH: "C:\\Windows\\System32",
+        OpenAi_Api_Key: "mixed-case-canary",
+        CanArY_SeCrEt: "arbitrary-canary",
+      },
+      "win32",
+    );
+
+    expect(spec.env.PATH).toBe("C:\\Windows\\System32");
+    expect(JSON.stringify(spec.env)).not.toContain("canary");
+    expect(spec.env).not.toHaveProperty("OPENAI_API_KEY");
+  });
+
+  it("keeps allowlist matching exact-case strict on POSIX", () => {
+    const spec = createHermesGatewaySpawnSpec(paths, { Path: "/canary/bin" }, "darwin");
+
+    expect(spec.env).not.toHaveProperty("PATH");
+    expect(JSON.stringify(spec.env)).not.toContain("canary");
+  });
 });

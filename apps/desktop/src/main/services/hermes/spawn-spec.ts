@@ -22,12 +22,22 @@ export interface HermesGatewaySpawnSpec {
 export function createHermesGatewaySpawnSpec(
   paths: HermesPaths,
   sourceEnv: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
 ): HermesGatewaySpawnSpec {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(sourceEnv)) {
-    if (value !== undefined && ALLOWED_ENV_KEYS.has(key)) {
-      env[key] = value;
+    if (value === undefined) {
+      continue;
     }
+
+    const canonicalKey = platform === "win32" ? key.toUpperCase() : key;
+    if (!ALLOWED_ENV_KEYS.has(canonicalKey)) {
+      continue;
+    }
+    if (platform === "win32" && Object.hasOwn(env, canonicalKey)) {
+      throw new Error(`Duplicate Windows environment variable: ${canonicalKey}`);
+    }
+    env[canonicalKey] = value;
   }
   env.HERMES_HOME = paths.hermesHome;
   env.PYTHONUNBUFFERED = "1";

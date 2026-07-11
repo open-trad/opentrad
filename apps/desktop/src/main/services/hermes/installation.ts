@@ -33,14 +33,15 @@ export async function verifyHermesInstallation(
   let result: HermesCommandResult;
   try {
     result = await runner(pythonExecutable, ["-c", HERMES_VERSION_QUERY]);
-  } catch (cause) {
-    throw new HermesRuntimeUnavailableError("version check failed", { cause });
+  } catch {
+    throw new HermesRuntimeUnavailableError("version check failed");
   }
 
   const installedVersion = result.stdout.trim();
   if (installedVersion !== HERMES_AGENT_VERSION) {
-    const found = installedVersion || "no version returned";
-    throw new HermesRuntimeUnavailableError(`expected ${HERMES_AGENT_VERSION}, found ${found}`);
+    throw new HermesRuntimeUnavailableError(
+      `expected ${HERMES_AGENT_VERSION}, managed runtime reports a different version`,
+    );
   }
 
   return {
