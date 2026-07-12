@@ -5,6 +5,14 @@ import {
   HermesGatewayClient,
   type HermesGatewayProcess,
 } from "../src/main/services/hermes/gateway-client";
+import { HERMES_GATEWAY_REQUEST_METHODS } from "../src/main/services/hermes/gateway-protocol";
+import {
+  isValidHermesGatewayRequestParams,
+  isValidHermesGatewayRequestResult,
+} from "../src/main/services/hermes/gateway-validation";
+
+const LIVE_SESSION_ID = "deadbeef";
+const STORED_SESSION_ID = "20260711_120000_abcdef";
 
 const PINNED_READY_FRAME = {
   jsonrpc: "2.0",
@@ -74,27 +82,15 @@ describe("Hermes v2026.7.7.2 gateway wire contract", () => {
   });
 });
 
-describe("Hermes v2026.7.7.2 request contracts", () => {
-  it("writes the pinned snake_case session.create contract", async () => {
+describe("OpenTrad owned launcher request contracts", () => {
+  it("writes the exact empty external session.create params object", async () => {
     const gateway = fakeGateway();
     const client = createClient(gateway);
     gateway.send(PINNED_READY_FRAME);
     await client.ready();
 
-    const request = client.request("session.create", {
-      cwd: "/workspace",
-      source: "opentrad",
-      close_on_disconnect: true,
-      cols: 120,
-      title: "task",
-      parent_session_id: "parent",
-      profile: "default",
-      model: "model",
-      provider: "provider",
-      reasoning_effort: "high",
-      fast: true,
-      messages: [],
-    });
+    const request = client.request("session.create", {});
+    void request.catch(() => {});
     await Promise.resolve();
 
     expect(gateway.stdinMessages()).toEqual([
@@ -102,38 +98,138 @@ describe("Hermes v2026.7.7.2 request contracts", () => {
         jsonrpc: "2.0",
         id: 1,
         method: "session.create",
-        params: {
-          cwd: "/workspace",
-          source: "opentrad",
-          close_on_disconnect: true,
-          cols: 120,
-          title: "task",
-          parent_session_id: "parent",
-          profile: "default",
-          model: "model",
-          provider: "provider",
-          reasoning_effort: "high",
-          fast: true,
-          messages: [],
-        },
+        params: {},
       },
     ]);
     gateway.send({
       jsonrpc: "2.0",
       id: 1,
       result: {
-        session_id: "live-1",
-        stored_session_id: "stored-1",
+        session_id: LIVE_SESSION_ID,
+        stored_session_id: STORED_SESSION_ID,
         message_count: 0,
         messages: [],
         info: {},
       },
     });
     await expect(request).resolves.toMatchObject({
-      session_id: "live-1",
-      stored_session_id: "stored-1",
+      session_id: LIVE_SESSION_ID,
+      stored_session_id: STORED_SESSION_ID,
     });
     await client.dispose();
+  });
+
+  it("accepts only the launcher-owned external parameter shapes", () => {
+    const valid = [
+      ["session.create", {}],
+      ["session.resume", { session_id: STORED_SESSION_ID }],
+      ["session.status", { session_id: LIVE_SESSION_ID }],
+      ["session.close", { session_id: LIVE_SESSION_ID }],
+      ["session.interrupt", { session_id: LIVE_SESSION_ID }],
+      ["prompt.submit", { session_id: LIVE_SESSION_ID, text: "continue" }],
+      ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "once" }],
+      ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "deny" }],
+    ] as const;
+    for (const [method, params] of valid) {
+      expect(isValidHermesGatewayRequestParams(method, params), method).toBe(true);
+    }
+
+    const invalid = [
+      ["session.create", { cwd: "/workspace", source: "opentrad", close_on_disconnect: true }],
+      ["session.create", { extra: "canary" }],
+      ["session.resume", { session_id: LIVE_SESSION_ID }],
+      ["session.resume", { session_id: STORED_SESSION_ID, cols: 120 }],
+      ["session.status", { session_id: STORED_SESSION_ID }],
+      ["session.close", { session_id: "DEADBEEF" }],
+      ["session.interrupt", { session_id: "deadbee" }],
+      ["prompt.submit", { session_id: STORED_SESSION_ID, text: "continue" }],
+      ["prompt.submit", { session_id: LIVE_SESSION_ID, text: " \t\n " }],
+      ["prompt.submit", { session_id: LIVE_SESSION_ID, text: "bad-surrogate-\ud800" }],
+      ["prompt.submit", { session_id: LIVE_SESSION_ID, text: "a".repeat(262_145) }],
+      [
+        "prompt.submit",
+        { session_id: LIVE_SESSION_ID, text: "continue", truncate_before_user_ordinal: 0 },
+      ],
+      ["approval.respond", { session_id: STORED_SESSION_ID, choice: "once" }],
+      ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "session" }],
+      ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "always" }],
+      ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "once", all: false }],
+    ] as const;
+    for (const [method, params] of invalid) {
+      expect(isValidHermesGatewayRequestParams(method, params), method).toBe(false);
+    }
+  });
+
+  it("uses Unicode scalar and UTF-8 byte bounds for prompt text", () => {
+    const exactFourByteBoundary = "\u{1f642}".repeat(262_144);
+
+    expect(
+      isValidHermesGatewayRequestParams("prompt.submit", {
+        session_id: LIVE_SESSION_ID,
+        text: exactFourByteBoundary,
+      }),
+    ).toBe(true);
+    expect(Buffer.byteLength(exactFourByteBoundary, "utf8")).toBe(1024 * 1024);
+    expect(
+      isValidHermesGatewayRequestParams("prompt.submit", {
+        session_id: LIVE_SESSION_ID,
+        text: `${exactFourByteBoundary}a`,
+      }),
+    ).toBe(false);
+  });
+
+  it("validates live and stored identifiers in session.create results", () => {
+    const base = {
+      message_count: 0,
+      messages: [],
+      info: {},
+    };
+
+    expect(
+      isValidHermesGatewayRequestResult("session.create", {
+        ...base,
+        session_id: LIVE_SESSION_ID,
+        stored_session_id: STORED_SESSION_ID,
+      }),
+    ).toBe(true);
+    expect(
+      isValidHermesGatewayRequestResult("session.create", {
+        ...base,
+        session_id: "live-1",
+        stored_session_id: STORED_SESSION_ID,
+      }),
+    ).toBe(false);
+    expect(
+      isValidHermesGatewayRequestResult("session.create", {
+        ...base,
+        session_id: LIVE_SESSION_ID,
+        stored_session_id: "stored-1",
+      }),
+    ).toBe(false);
+  });
+
+  it("fails closed for throwing request and result object traps", () => {
+    const throwingRequest = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error("request-getter-canary");
+        },
+      },
+    );
+    const throwingResult = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("result-getter-canary");
+        },
+      },
+    );
+
+    for (const method of HERMES_GATEWAY_REQUEST_METHODS) {
+      expect(isValidHermesGatewayRequestParams(method, throwingRequest), method).toBe(false);
+      expect(isValidHermesGatewayRequestResult(method, throwingResult), method).toBe(false);
+    }
   });
 
   it.each([
@@ -170,7 +266,7 @@ describe("Hermes v2026.7.7.2 request contracts", () => {
     const client = createClient(gateway);
     gateway.send(PINNED_READY_FRAME);
     await client.ready();
-    const params = { session_id: "live-1" };
+    const params = { session_id: LIVE_SESSION_ID };
     Object.defineProperty(params, "toJSON", {
       enumerable: false,
       value: () => ({ sessionId: "serialized-secret-canary" }),
@@ -190,15 +286,15 @@ describe("Hermes v2026.7.7.2 request contracts", () => {
   it.each([
     [
       "session.create",
-      { cwd: "/workspace", source: "opentrad", close_on_disconnect: true },
+      {},
       { session_id: "live-secret-canary", message_count: 0, messages: [], info: {} },
     ],
     [
       "session.resume",
-      { session_id: "stored-1" },
+      { session_id: STORED_SESSION_ID },
       {
-        session_id: "live-1",
-        resumed: "stored-1",
+        session_id: LIVE_SESSION_ID,
+        resumed: STORED_SESSION_ID,
         message_count: 0,
         messages: [],
         info: {},
@@ -210,26 +306,26 @@ describe("Hermes v2026.7.7.2 request contracts", () => {
     ],
     [
       "session.resume",
-      { session_id: "stored-1" },
+      { session_id: STORED_SESSION_ID },
       {
-        session_id: "live-1",
-        resumed: "stored-1",
+        session_id: LIVE_SESSION_ID,
+        resumed: STORED_SESSION_ID,
         message_count: 0,
         messages: [],
         info: {},
-        session_key: "stored-1",
+        session_key: STORED_SESSION_ID,
         started_at: 1,
         running: false,
         status: "unknown",
       },
     ],
-    ["prompt.submit", { session_id: "live-1", text: "hello" }, { status: 42 }],
-    ["session.interrupt", { session_id: "live-1" }, { status: 42 }],
-    ["session.close", { session_id: "live-1" }, { closed: "yes" }],
-    ["session.status", { session_id: "live-1" }, { output: 42 }],
+    ["prompt.submit", { session_id: LIVE_SESSION_ID, text: "hello" }, { status: 42 }],
+    ["session.interrupt", { session_id: LIVE_SESSION_ID }, { status: 42 }],
+    ["session.close", { session_id: LIVE_SESSION_ID }, { closed: "yes" }],
+    ["session.status", { session_id: LIVE_SESSION_ID }, { output: 42 }],
     [
       "approval.respond",
-      { session_id: "live-1", choice: "once" },
+      { session_id: LIVE_SESSION_ID, choice: "once" },
       { resolved: "secret-result-canary" },
     ],
   ] as const)("fails closed on a malformed %s result", async (method, params, result) => {

@@ -13,6 +13,9 @@ const PINNED_READY_FRAME = {
   method: "event",
   params: { type: "gateway.ready", payload: { skin: "hermes" } },
 } as const;
+const LIVE_SESSION_ID = "deadbeef";
+const SECOND_LIVE_SESSION_ID = "cafebabe";
+const MAX_PROMPT_TEXT = "\u{1f642}".repeat(262_144);
 
 afterEach(() => {
   vi.useRealTimers();
@@ -27,8 +30,8 @@ describe("Hermes gateway outbound flow control", () => {
     const requests = Array.from({ length: 48 }, (_, index) =>
       client
         .request("prompt.submit", {
-          session_id: `live-${index}`,
-          text: "x".repeat(1024 * 1024),
+          session_id: liveSessionId(index),
+          text: MAX_PROMPT_TEXT,
         })
         .catch((cause: unknown) => cause),
     );
@@ -44,7 +47,7 @@ describe("Hermes gateway outbound flow control", () => {
   it("snapshots serialized params before ready instead of retaining the caller object", async () => {
     const gateway = fakeGateway();
     const client = createClient(gateway);
-    const params = { session_id: "live-1", text: "before-ready" };
+    const params = { session_id: LIVE_SESSION_ID, text: "before-ready" };
 
     const request = client.request("prompt.submit", params);
     params.text = "mutated-after-call";
@@ -73,8 +76,8 @@ describe("Hermes gateway outbound flow control", () => {
     const requests = Array.from({ length: 10 }, (_, index) =>
       client
         .request("prompt.submit", {
-          session_id: `live-${index}`,
-          text: "x".repeat(1024 * 1024),
+          session_id: liveSessionId(index),
+          text: MAX_PROMPT_TEXT,
         })
         .catch((cause: unknown) => cause),
     );
@@ -96,8 +99,8 @@ describe("Hermes gateway outbound flow control", () => {
     gateway.send(PINNED_READY_FRAME);
     await client.ready();
 
-    const first = client.request("session.status", { session_id: "live-1" });
-    const second = client.request("session.status", { session_id: "live-2" });
+    const first = client.request("session.status", { session_id: LIVE_SESSION_ID });
+    const second = client.request("session.status", { session_id: SECOND_LIVE_SESSION_ID });
     await Promise.resolve();
 
     expect(gateway.stdinWrite).toHaveBeenCalledTimes(1);
@@ -113,7 +116,7 @@ describe("Hermes gateway outbound flow control", () => {
     await client.dispose();
   });
 
-  it("rejects a frame larger than 4 MiB before any write", async () => {
+  it("rejects a prompt larger than the 1 MiB launcher contract before any write", async () => {
     vi.useFakeTimers();
     const stdin = new StalledWritable();
     const gateway = fakeGateway(stdin);
@@ -122,13 +125,13 @@ describe("Hermes gateway outbound flow control", () => {
     await client.ready();
 
     const request = client.request("prompt.submit", {
-      session_id: "live-1",
+      session_id: LIVE_SESSION_ID,
       text: "x".repeat(HERMES_GATEWAY_MAX_FRAME_BYTES),
     });
     const outcome = request.catch((cause: unknown) => cause);
     await vi.advanceTimersByTimeAsync(20);
 
-    expect(await outcome).toMatchObject({ code: "HERMES_GATEWAY_FRAME_TOO_LARGE" });
+    expect(await outcome).toMatchObject({ code: "HERMES_GATEWAY_INVALID_PARAMS" });
     expect(gateway.stdinWrite).not.toHaveBeenCalled();
     expect(gateway.terminate).not.toHaveBeenCalled();
     await client.dispose();
@@ -142,18 +145,14 @@ describe("Hermes gateway outbound flow control", () => {
     gateway.send(PINNED_READY_FRAME);
     await client.ready();
 
-    const first = client.request("session.status", { session_id: "live-1" });
-    const second = client.request("prompt.submit", {
-      session_id: "live-1",
-      text: "a".repeat(3 * 1024 * 1024),
-    });
-    const overflow = client.request("prompt.submit", {
-      session_id: "live-1",
-      text: "b".repeat(2 * 1024 * 1024),
-    });
-    const outcomes = [first, second, overflow].map((promise) =>
-      promise.catch((cause: unknown) => cause),
+    const first = client.request("session.status", { session_id: LIVE_SESSION_ID });
+    const prompts = Array.from({ length: 4 }, (_, index) =>
+      client.request("prompt.submit", {
+        session_id: liveSessionId(index),
+        text: MAX_PROMPT_TEXT,
+      }),
     );
+    const outcomes = [first, ...prompts].map((promise) => promise.catch((cause: unknown) => cause));
     await vi.advanceTimersByTimeAsync(20);
 
     for (const outcome of outcomes) {
@@ -171,15 +170,13 @@ describe("Hermes gateway outbound flow control", () => {
     gateway.send(PINNED_READY_FRAME);
     await client.ready();
 
-    const stalled = client.request("prompt.submit", {
-      session_id: "live-1",
-      text: "a".repeat(HERMES_GATEWAY_MAX_FRAME_BYTES - 256),
-    });
-    const overflow = client.request("prompt.submit", {
-      session_id: "live-1",
-      text: "b".repeat(1024),
-    });
-    const outcomes = [stalled, overflow].map((promise) => promise.catch((cause: unknown) => cause));
+    const requests = Array.from({ length: 4 }, (_, index) =>
+      client.request("prompt.submit", {
+        session_id: liveSessionId(index),
+        text: MAX_PROMPT_TEXT,
+      }),
+    );
+    const outcomes = requests.map((promise) => promise.catch((cause: unknown) => cause));
     await vi.advanceTimersByTimeAsync(20);
 
     for (const outcome of outcomes) {
@@ -200,7 +197,7 @@ describe("Hermes gateway outbound flow control", () => {
 
     const requests = Array.from({ length: 65 }, (_, index) =>
       client
-        .request("session.status", { session_id: `live-${index}` })
+        .request("session.status", { session_id: liveSessionId(index) })
         .catch((cause: unknown) => cause),
     );
     await vi.advanceTimersByTimeAsync(20);
@@ -225,10 +222,10 @@ describe("Hermes gateway outbound flow control", () => {
     gateway.send(PINNED_READY_FRAME);
     await client.ready();
     const first = client
-      .request("session.status", { session_id: "live-1" })
+      .request("session.status", { session_id: LIVE_SESSION_ID })
       .catch((cause: unknown) => cause);
     const second = client
-      .request("session.status", { session_id: "live-2" })
+      .request("session.status", { session_id: SECOND_LIVE_SESSION_ID })
       .catch((cause: unknown) => cause);
     await Promise.resolve();
     expect(gateway.stdinWrite).toHaveBeenCalledTimes(1);
@@ -266,7 +263,7 @@ describe("Hermes gateway outbound flow control", () => {
     };
 
     const request = client
-      .request("session.status", { session_id: "live-1" })
+      .request("session.status", { session_id: LIVE_SESSION_ID })
       .catch((cause: unknown) => cause);
     await Promise.resolve();
     await disposal;
@@ -290,8 +287,8 @@ describe("Hermes gateway outbound flow control", () => {
     const client = createClient(gateway);
     gateway.send(PINNED_READY_FRAME);
     await client.ready();
-    const first = client.request("session.status", { session_id: "live-1" });
-    const second = client.request("session.status", { session_id: "live-2" });
+    const first = client.request("session.status", { session_id: LIVE_SESSION_ID });
+    const second = client.request("session.status", { session_id: SECOND_LIVE_SESSION_ID });
     await Promise.resolve();
     expect(gateway.stdinWrite).toHaveBeenCalledOnce();
 
@@ -319,7 +316,7 @@ describe("Hermes gateway outbound flow control", () => {
     const client = createClient(gateway);
     gateway.send(PINNED_READY_FRAME);
     await client.ready();
-    const requests = ["one", "two", "three"].map((session_id) =>
+    const requests = [LIVE_SESSION_ID, SECOND_LIVE_SESSION_ID, "0123abcd"].map((session_id) =>
       client.request("session.status", { session_id }),
     );
     await Promise.resolve();
@@ -352,10 +349,10 @@ describe("Hermes gateway outbound flow control", () => {
     gateway.send(PINNED_READY_FRAME);
     await client.ready();
     const first = client
-      .request("session.status", { session_id: "live-1" })
+      .request("session.status", { session_id: LIVE_SESSION_ID })
       .catch((cause: unknown) => cause);
     const unsent = client
-      .request("session.status", { session_id: "live-2" })
+      .request("session.status", { session_id: SECOND_LIVE_SESSION_ID })
       .catch((cause: unknown) => cause);
     await Promise.resolve();
     expect(gateway.stdinWrite).toHaveBeenCalledOnce();
@@ -380,7 +377,7 @@ describe("Hermes gateway outbound flow control", () => {
       gateway.send({ jsonrpc: "2.0", id: 1, result: { output: "synchronous" } });
     };
 
-    const request = client.request("session.status", { session_id: "live-1" });
+    const request = client.request("session.status", { session_id: LIVE_SESSION_ID });
 
     await expect(request).resolves.toEqual({ output: "synchronous" });
     expect(gateway.terminate).not.toHaveBeenCalled();
@@ -395,7 +392,7 @@ describe("Hermes gateway outbound flow control", () => {
     await client.ready();
     (client as unknown as { nextRequestId: number }).nextRequestId = Number.MAX_SAFE_INTEGER;
 
-    const lastSafe = client.request("session.status", { session_id: "live-1" });
+    const lastSafe = client.request("session.status", { session_id: LIVE_SESSION_ID });
     await Promise.resolve();
     gateway.send({
       jsonrpc: "2.0",
@@ -403,7 +400,9 @@ describe("Hermes gateway outbound flow control", () => {
       result: { output: "ok" },
     });
     await expect(lastSafe).resolves.toEqual({ output: "ok" });
-    await expect(client.request("session.status", { session_id: "live-2" })).rejects.toMatchObject({
+    await expect(
+      client.request("session.status", { session_id: SECOND_LIVE_SESSION_ID }),
+    ).rejects.toMatchObject({
       code: "HERMES_GATEWAY_PROTOCOL",
     });
     expect(gateway.stdinWrite).toHaveBeenCalledOnce();
@@ -546,4 +545,8 @@ function createClient(gateway: FakeGateway, requestTimeoutMs = 100): HermesGatew
     readyTimeoutMs: 100,
     requestTimeoutMs,
   });
+}
+
+function liveSessionId(index: number): string {
+  return index.toString(16).padStart(8, "0");
 }

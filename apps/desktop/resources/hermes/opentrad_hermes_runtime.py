@@ -1184,7 +1184,10 @@ def _normalize_owned_request(
 
     normalized_params: dict[str, object]
     if method == "session.create":
-        if not _has_exact_keys(params, frozenset({"cwd", "source"})):
+        if not _has_exact_keys(
+            params,
+            frozenset({"close_on_disconnect", "cwd", "source"}),
+        ):
             return _rpc_error(request_id, -32602)
         cwd = params["cwd"]
         if (
@@ -1194,9 +1197,14 @@ def _normalize_owned_request(
             or not _is_strict_utf8(cwd)
             or not Path(cwd).is_absolute()
             or params["source"] != "opentrad"
+            or params["close_on_disconnect"] is not True
         ):
             return _rpc_error(request_id, -32602)
-        normalized_params = {"cwd": cwd, "source": "opentrad"}
+        normalized_params = {
+            "cwd": cwd,
+            "source": "opentrad",
+            "close_on_disconnect": True,
+        }
     elif method == "session.resume":
         if not _has_exact_keys(params, frozenset({"session_id"})):
             return _rpc_error(request_id, -32602)
@@ -1295,6 +1303,7 @@ def _build_owned_handlers(
             {
                 "lazy": True,
                 "message_count": 0,
+                "output": "",
                 "persisted": False,
                 "resumable": False,
                 "running": False,
@@ -1315,7 +1324,7 @@ def _build_owned_handlers(
     ) -> dict[str, object]:
         if sessions.stored_session_id(params["session_id"]) is None:
             return _rpc_error(request_id, -32602)
-        return _rpc_result(request_id, {"interrupted": False})
+        return _rpc_result(request_id, {"status": "interrupted"})
 
     def prompt(request_id: int | str, _params: dict[str, object]) -> dict[str, object]:
         return _rpc_error(request_id, -32603)
@@ -1323,7 +1332,7 @@ def _build_owned_handlers(
     def approval(
         request_id: int | str, _params: dict[str, object]
     ) -> dict[str, object]:
-        return _rpc_result(request_id, {"resolved": False})
+        return _rpc_result(request_id, {"resolved": 0})
 
     return {
         "approval.respond": approval,

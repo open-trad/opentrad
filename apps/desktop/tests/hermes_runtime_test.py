@@ -609,12 +609,52 @@ class RuntimeModuleTests(unittest.TestCase):
                 subprocess.run = forbidden_side_effect
                 socket.socket = forbidden_side_effect
                 try:
+                    invalid_create_params = (
+                        {"cwd": str(site_packages), "source": "opentrad"},
+                        {
+                            "cwd": str(site_packages),
+                            "source": "opentrad",
+                            "close_on_disconnect": False,
+                        },
+                        {
+                            "cwd": str(site_packages),
+                            "source": "opentrad",
+                            "close_on_disconnect": True,
+                            "extra": CANARY,
+                        },
+                    )
+                    for invalid_params in invalid_create_params:
+                        invalid_create = guarded.dispatch(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 100,
+                                "method": "session.create",
+                                "params": invalid_params,
+                            }
+                        )
+                        self.assertEqual(
+                            invalid_create,
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 100,
+                                "error": {
+                                    "code": -32602,
+                                    "message": "Invalid params",
+                                },
+                            },
+                        )
+                        self.assertNotIn(CANARY, repr(invalid_create))
+
                     created = guarded.dispatch(
                         {
                             "jsonrpc": "2.0",
                             "id": 1,
                             "method": "session.create",
-                            "params": {"cwd": str(site_packages), "source": "opentrad"},
+                            "params": {
+                                "cwd": str(site_packages),
+                                "source": "opentrad",
+                                "close_on_disconnect": True,
+                            },
                         }
                     )
                     self.assertEqual(set(created or {}), {"jsonrpc", "id", "result"})
@@ -666,6 +706,7 @@ class RuntimeModuleTests(unittest.TestCase):
                             "result": {
                                 "lazy": True,
                                 "message_count": 0,
+                                "output": "",
                                 "persisted": False,
                                 "resumable": False,
                                 "running": False,
@@ -693,7 +734,7 @@ class RuntimeModuleTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         approval,
-                        {"jsonrpc": "2.0", "id": 3, "result": {"resolved": False}},
+                        {"jsonrpc": "2.0", "id": 3, "result": {"resolved": 0}},
                     )
 
                     prompt = guarded.dispatch(
@@ -730,7 +771,7 @@ class RuntimeModuleTests(unittest.TestCase):
                         {
                             "jsonrpc": "2.0",
                             "id": 6,
-                            "result": {"interrupted": False},
+                            "result": {"status": "interrupted"},
                         },
                     )
                     closed = guarded.dispatch(
@@ -989,7 +1030,11 @@ class RuntimeModuleTests(unittest.TestCase):
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "session.create",
-                    "params": {"cwd": str(site_packages), "source": "opentrad"},
+                    "params": {
+                        "cwd": str(site_packages),
+                        "source": "opentrad",
+                        "close_on_disconnect": True,
+                    },
                 }
 
                 self.assertIs(type(server._methods), types.MappingProxyType)
@@ -1249,6 +1294,7 @@ class RuntimeModuleTests(unittest.TestCase):
                                     "params": {
                                         "cwd": str(site_packages),
                                         "source": "opentrad",
+                                        "close_on_disconnect": True,
                                     },
                                 }
                             )
@@ -2244,7 +2290,11 @@ except runtime.RuntimeImportRefusal:
     raw_refused = True
 created = guarded.dispatch({
     "jsonrpc": "2.0", "id": 2, "method": "session.create",
-    "params": {"cwd": str(Path.cwd()), "source": "opentrad"},
+    "params": {
+        "cwd": str(Path.cwd()),
+        "source": "opentrad",
+        "close_on_disconnect": True,
+    },
 })
 created_result = created.get("result", {})
 sid = created_result.get("session_id", "")
@@ -2277,13 +2327,14 @@ responses_ok = (
     created_result.get("persisted") is False
     and created_result.get("resumable") is False
     and status.get("result", {}).get("stored_session_id") == stored
+    and status.get("result", {}).get("output") == ""
     and status.get("result", {}).get("persisted") is False
     and "path" not in repr(status).lower()
     and "tools" not in repr(status).lower()
     and "provider" not in repr(status).lower()
-    and approval == {"jsonrpc": "2.0", "id": 4, "result": {"resolved": False}}
+    and approval == {"jsonrpc": "2.0", "id": 4, "result": {"resolved": 0}}
     and prompt.get("error", {}).get("code") == -32603
-    and interrupted == {"jsonrpc": "2.0", "id": 6, "result": {"interrupted": False}}
+    and interrupted == {"jsonrpc": "2.0", "id": 6, "result": {"status": "interrupted"}}
     and resumed.get("error", {}).get("code") == -32603
     and closed == {"jsonrpc": "2.0", "id": 8, "result": {"closed": True}}
 )

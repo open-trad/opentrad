@@ -59,7 +59,7 @@ OWNED_RUNTIME_FILENAME = "opentrad_hermes_runtime.py"
 OWNED_RUNTIME_MODULE_NAME = "_opentrad_owned_hermes_runtime_v1"
 OWNED_RUNTIME_MAX_BYTES = 512 * 1024
 OWNED_RUNTIME_SHA256 = (
-    "6e36115f78f35a6d70362c3dd6f06c84b270974851bfdde6260d7a280cf901ad"
+    "a99967df486337f9e56d18e2dfc3a3cae9b70abdff20d532c1613ab856515c49"
 )
 STORED_SESSION_ID_PATTERN = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{6}$", re.ASCII)
 LIVE_SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{8}$")
@@ -572,7 +572,11 @@ def _normalize_rpc_params(
 
     if method == "session.create":
         _require_exact_rpc_keys(params, frozenset())
-        return {"cwd": str(policy_context.cwd), "source": "opentrad"}
+        return {
+            "cwd": str(policy_context.cwd),
+            "source": "opentrad",
+            "close_on_disconnect": True,
+        }
 
     if method == "session.resume":
         _require_exact_rpc_keys(params, frozenset({"session_id"}))

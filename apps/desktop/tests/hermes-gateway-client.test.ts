@@ -11,6 +11,10 @@ import {
   isHermesGatewayRequestMethod,
 } from "../src/main/services/hermes/gateway-protocol";
 
+const LIVE_SESSION_ID = "deadbeef";
+const SECOND_LIVE_SESSION_ID = "cafebabe";
+const STORED_SESSION_ID = "20260711_120000_abcdef";
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -50,7 +54,7 @@ describe("HermesGatewayClient readiness and requests", () => {
     const gateway = fakeGateway();
     const client = createClient(gateway);
 
-    const result = client.request("session.status", { session_id: "session-1" });
+    const result = client.request("session.status", { session_id: LIVE_SESSION_ID });
     await Promise.resolve();
     expect(gateway.stdinText()).toBe("");
 
@@ -61,7 +65,7 @@ describe("HermesGatewayClient readiness and requests", () => {
       jsonrpc: "2.0",
       id: 1,
       method: "session.status",
-      params: { session_id: "session-1" },
+      params: { session_id: LIVE_SESSION_ID },
     });
 
     gateway.send({ jsonrpc: "2.0", id: request?.id, result: { output: "idle" } });
@@ -104,12 +108,8 @@ describe("HermesGatewayClient readiness and requests", () => {
     gateway.send(pinnedReadyFrame());
     await client.ready();
 
-    const first = client.request("session.create", {
-      cwd: "/workspace",
-      source: "opentrad",
-      close_on_disconnect: true,
-    });
-    const second = client.request("session.status", { session_id: "two" });
+    const first = client.request("session.create", {});
+    const second = client.request("session.status", { session_id: SECOND_LIVE_SESSION_ID });
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(gateway.stdinText().endsWith("\n")).toBe(true);
@@ -118,17 +118,13 @@ describe("HermesGatewayClient readiness and requests", () => {
         jsonrpc: "2.0",
         id: 1,
         method: "session.create",
-        params: {
-          cwd: "/workspace",
-          source: "opentrad",
-          close_on_disconnect: true,
-        },
+        params: {},
       },
       {
         jsonrpc: "2.0",
         id: 2,
         method: "session.status",
-        params: { session_id: "two" },
+        params: { session_id: SECOND_LIVE_SESSION_ID },
       },
     ]);
 
@@ -138,8 +134,8 @@ describe("HermesGatewayClient readiness and requests", () => {
           jsonrpc: "2.0",
           id: 1,
           result: {
-            session_id: "live-1",
-            stored_session_id: "stored-1",
+            session_id: LIVE_SESSION_ID,
+            stored_session_id: STORED_SESSION_ID,
             message_count: 0,
             messages: [],
             info: {},
@@ -147,7 +143,7 @@ describe("HermesGatewayClient readiness and requests", () => {
         },
       )}\n`,
     );
-    await expect(first).resolves.toMatchObject({ stored_session_id: "stored-1" });
+    await expect(first).resolves.toMatchObject({ stored_session_id: STORED_SESSION_ID });
     await expect(second).resolves.toEqual({ output: "second" });
     await client.dispose();
   });
@@ -159,7 +155,7 @@ describe("HermesGatewayClient readiness and requests", () => {
     await client.ready();
 
     const failed = client.request("prompt.submit", {
-      session_id: "live-1",
+      session_id: LIVE_SESSION_ID,
       text: "request-param-canary",
     });
     await Promise.resolve();
@@ -185,7 +181,7 @@ describe("HermesGatewayClient readiness and requests", () => {
     expect(JSON.stringify(error)).not.toContain("canary");
     expect(gateway.terminate).not.toHaveBeenCalled();
 
-    const healthy = client.request("session.status", { session_id: "still-live" });
+    const healthy = client.request("session.status", { session_id: SECOND_LIVE_SESSION_ID });
     await new Promise<void>((resolve) => setImmediate(resolve));
     gateway.send({ jsonrpc: "2.0", id: 2, result: { output: "healthy" } });
     await expect(healthy).resolves.toEqual({ output: "healthy" });
@@ -207,7 +203,7 @@ describe("HermesGatewayClient readiness and requests", () => {
         "session.status",
         serializableStatusParams(() => {
           disposal = client.dispose();
-          return { session_id: "must-not-write" };
+          return { session_id: LIVE_SESSION_ID };
         }),
       )
       .catch((error: unknown) => {
@@ -235,7 +231,7 @@ describe("HermesGatewayClient readiness and requests", () => {
         "session.status",
         serializableStatusParams(() => {
           gateway.process.emit("error", new Error("serializer-crash-canary"));
-          return { session_id: "must-not-write" };
+          return { session_id: LIVE_SESSION_ID };
         }),
       )
       .catch((error: unknown) => {
@@ -277,7 +273,7 @@ describe("HermesGatewayClient readiness and requests", () => {
     const gateway = fakeGateway();
     const client = createClient(gateway, { readyTimeoutMs: 20 });
     const ready = client.ready();
-    const request = client.request("session.status", { session_id: "waiting-param-canary" });
+    const request = client.request("session.status", { session_id: LIVE_SESSION_ID });
     const readyResult = ready.catch((cause: unknown) => cause);
     const requestResult = request.catch((cause: unknown) => cause);
 
@@ -303,10 +299,10 @@ describe("HermesGatewayClient readiness and requests", () => {
     gateway.send(pinnedReadyFrame());
     await client.ready();
     const first = client.request("prompt.submit", {
-      session_id: "live-1",
+      session_id: LIVE_SESSION_ID,
       text: "first-param-canary",
     });
-    const second = client.request("session.status", { session_id: "second-param-canary" });
+    const second = client.request("session.status", { session_id: SECOND_LIVE_SESSION_ID });
     let firstError: unknown;
     let secondError: unknown;
     void first.catch((error: unknown) => {
@@ -423,7 +419,7 @@ describe("HermesGatewayClient strict incremental NDJSON parsing", () => {
     const client = createClient(gateway);
     gateway.send(pinnedReadyFrame());
     await client.ready();
-    const pending = client.request("session.status", { session_id: "one" });
+    const pending = client.request("session.status", { session_id: LIVE_SESSION_ID });
     await Promise.resolve();
 
     gateway.send(invalidMessage);
@@ -440,7 +436,9 @@ describe("HermesGatewayClient strict incremental NDJSON parsing", () => {
 
     gateway.send({ jsonrpc: "2.0", id: 999, result: null });
 
-    await expect(client.request("session.status", { session_id: "one" })).rejects.toMatchObject({
+    await expect(
+      client.request("session.status", { session_id: LIVE_SESSION_ID }),
+    ).rejects.toMatchObject({
       code: "HERMES_GATEWAY_PROTOCOL",
     });
     expect(gateway.stdinText()).toBe("");
@@ -452,14 +450,16 @@ describe("HermesGatewayClient strict incremental NDJSON parsing", () => {
     const client = createClient(gateway);
     gateway.send(pinnedReadyFrame());
     await client.ready();
-    const request = client.request("session.status", { session_id: "one" });
+    const request = client.request("session.status", { session_id: LIVE_SESSION_ID });
     await Promise.resolve();
     gateway.send({ jsonrpc: "2.0", id: 1, result: { output: "once" } });
     await expect(request).resolves.toEqual({ output: "once" });
 
     gateway.send({ jsonrpc: "2.0", id: 1, result: "twice" });
 
-    await expect(client.request("session.status", { session_id: "two" })).rejects.toMatchObject({
+    await expect(
+      client.request("session.status", { session_id: SECOND_LIVE_SESSION_ID }),
+    ).rejects.toMatchObject({
       code: "HERMES_GATEWAY_PROTOCOL",
     });
     expect(gateway.terminate).toHaveBeenCalledOnce();
@@ -525,7 +525,7 @@ describe("HermesGatewayClient notifications and lifecycle", () => {
     gateway.send(pinnedReadyFrame({ skin: "hermes", duplicate: true }));
     await client.ready();
 
-    const request = client.request("session.status", { session_id: "live-1" });
+    const request = client.request("session.status", { session_id: LIVE_SESSION_ID });
     await Promise.resolve();
     gateway.send({ jsonrpc: "2.0", id: 1, result: { output: "alive" } });
 
@@ -565,7 +565,7 @@ describe("HermesGatewayClient notifications and lifecycle", () => {
     const crashes = vi.fn();
     client.onCrash(crashes);
     const pending = client.request("prompt.submit", {
-      session_id: "live-1",
+      session_id: LIVE_SESSION_ID,
       text: "pending-canary",
     });
     await Promise.resolve();
@@ -608,14 +608,14 @@ describe("HermesGatewayClient notifications and lifecycle", () => {
     client.onCrash(crashes);
     gateway.send(pinnedReadyFrame());
     await client.ready();
-    const pending = client.request("session.status", { session_id: "pending" });
+    const pending = client.request("session.status", { session_id: LIVE_SESSION_ID });
     await Promise.resolve();
 
     await Promise.all([client.dispose(), client.dispose()]);
 
     await expect(pending).rejects.toMatchObject({ code: "HERMES_GATEWAY_DISPOSED" });
     await expect(
-      client.request("session.status", { session_id: "after-dispose" }),
+      client.request("session.status", { session_id: SECOND_LIVE_SESSION_ID }),
     ).rejects.toMatchObject({
       code: "HERMES_GATEWAY_DISPOSED",
     });
@@ -667,7 +667,7 @@ describe("HermesGatewayClient notifications and lifecycle", () => {
     const gateway = fakeGateway();
     const client = createClient(gateway);
     const ready = client.ready();
-    const request = client.request("session.status", { session_id: "waiting" });
+    const request = client.request("session.status", { session_id: LIVE_SESSION_ID });
 
     await client.dispose();
 
@@ -697,7 +697,7 @@ function gatewayEvent(type: string, payload: unknown = {}, sessionId?: string) {
 function serializableStatusParams(toJSON: () => { readonly session_id: string }): {
   readonly session_id: string;
 } {
-  const params = { session_id: "serializer-placeholder" };
+  const params = { session_id: LIVE_SESSION_ID };
   Object.defineProperty(params, "toJSON", { enumerable: false, value: toJSON });
   return params;
 }

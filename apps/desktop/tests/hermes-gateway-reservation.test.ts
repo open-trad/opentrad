@@ -11,6 +11,8 @@ const PINNED_READY_FRAME = {
   method: "event",
   params: { type: "gateway.ready", payload: { skin: "hermes" } },
 } as const;
+const LIVE_SESSION_ID = "deadbeef";
+const SECOND_LIVE_SESSION_ID = "cafebabe";
 
 describe("Hermes gateway request reservations", () => {
   it("assigns distinct IDs when params.toJSON reenters request and settles both calls", async () => {
@@ -19,12 +21,12 @@ describe("Hermes gateway request reservations", () => {
     gateway.send(PINNED_READY_FRAME);
     await client.ready();
     let nested: Promise<unknown> | undefined;
-    const outerParams = { session_id: "outer" };
+    const outerParams = { session_id: LIVE_SESSION_ID };
     Object.defineProperty(outerParams, "toJSON", {
       enumerable: false,
       value: () => {
-        nested = client.request("session.status", { session_id: "nested" });
-        return { session_id: "outer" };
+        nested = client.request("session.status", { session_id: SECOND_LIVE_SESSION_ID });
+        return { session_id: LIVE_SESSION_ID };
       },
     });
 
@@ -51,8 +53,8 @@ describe("Hermes gateway request reservations", () => {
 
     expect(new Set(messages.map((message) => message.id)).size).toBe(2);
     expect(settled).toEqual([
-      { status: "fulfilled", value: { output: "outer" } },
-      { status: "fulfilled", value: { output: "nested" } },
+      { status: "fulfilled", value: { output: LIVE_SESSION_ID } },
+      { status: "fulfilled", value: { output: SECOND_LIVE_SESSION_ID } },
     ]);
   });
 
@@ -64,7 +66,7 @@ describe("Hermes gateway request reservations", () => {
     const outcomes: Promise<unknown>[] = [];
 
     const reentrantParams = (depth: number): { readonly session_id: string } => {
-      const params = { session_id: `depth-${depth}` };
+      const params = { session_id: liveSessionId(depth) };
       Object.defineProperty(params, "toJSON", {
         enumerable: false,
         value: () => {
@@ -75,7 +77,7 @@ describe("Hermes gateway request reservations", () => {
                 .catch((error: unknown) => error),
             );
           }
-          return { session_id: `depth-${depth}` };
+          return { session_id: liveSessionId(depth) };
         },
       });
       return params;
@@ -132,7 +134,7 @@ describe("Hermes gateway request reservations", () => {
   it("releases a reservation when params serialization throws", async () => {
     const gateway = fakeGateway();
     const client = createClient(gateway);
-    const params = { session_id: "live-1" };
+    const params = { session_id: LIVE_SESSION_ID };
     Object.defineProperty(params, "toJSON", {
       enumerable: false,
       value: () => {
@@ -173,12 +175,12 @@ describe("Hermes gateway request reservations", () => {
     const gateway = fakeGateway();
     const client = createClient(gateway);
     let disposal: Promise<void> | undefined;
-    const params = { session_id: "live-1" };
+    const params = { session_id: LIVE_SESSION_ID };
     Object.defineProperty(params, "toJSON", {
       enumerable: false,
       value: () => {
         disposal = client.dispose();
-        return { session_id: "live-1" };
+        return { session_id: LIVE_SESSION_ID };
       },
     });
 
@@ -200,6 +202,10 @@ function reservationState(client: HermesGatewayClient): {
     outboundQueue: unknown[];
     reservedRequestCount: number;
   };
+}
+
+function liveSessionId(index: number): string {
+  return index.toString(16).padStart(8, "0");
 }
 
 async function settleWithin<T>(

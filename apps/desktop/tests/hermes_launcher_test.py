@@ -1294,7 +1294,11 @@ class RpcPolicyTests(unittest.TestCase):
             (
                 "session.create",
                 {},
-                {"cwd": "/opentrad/gateway-cwd", "source": "opentrad"},
+                {
+                    "cwd": "/opentrad/gateway-cwd",
+                    "source": "opentrad",
+                    "close_on_disconnect": True,
+                },
             ),
             (
                 "session.resume",
@@ -2072,6 +2076,7 @@ class NdjsonLoopTests(unittest.TestCase):
                     "params": {
                         "cwd": "/opentrad/gateway-cwd",
                         "source": "opentrad",
+                        "close_on_disconnect": True,
                     },
                 }
             ],

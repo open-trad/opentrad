@@ -10,20 +10,7 @@ export const HERMES_GATEWAY_REQUEST_METHODS = [
 
 export type HermesGatewayRequestMethod = (typeof HERMES_GATEWAY_REQUEST_METHODS)[number];
 
-export interface HermesSessionCreateParams {
-  readonly cwd: string;
-  readonly source: "opentrad";
-  readonly close_on_disconnect: true;
-  readonly cols?: number;
-  readonly messages?: readonly unknown[];
-  readonly title?: string;
-  readonly parent_session_id?: string;
-  readonly profile?: string;
-  readonly model?: string;
-  readonly provider?: string;
-  readonly reasoning_effort?: string;
-  readonly fast?: boolean;
-}
+export type HermesSessionCreateParams = Readonly<Record<string, never>>;
 
 export interface HermesSessionCreateResult {
   readonly session_id: string;
@@ -35,8 +22,6 @@ export interface HermesSessionCreateResult {
 
 export interface HermesSessionResumeParams {
   readonly session_id: string;
-  readonly cols?: number;
-  readonly profile?: string;
 }
 
 export interface HermesSessionResumeResult {
@@ -55,7 +40,6 @@ export interface HermesSessionResumeResult {
 export interface HermesPromptSubmitParams {
   readonly session_id: string;
   readonly text: string;
-  readonly truncate_before_user_ordinal?: number;
 }
 
 export interface HermesPromptSubmitResult {
@@ -78,12 +62,11 @@ export interface HermesSessionStatusResult {
   readonly output: string;
 }
 
-export type HermesApprovalChoice = "once" | "session" | "always" | "deny";
+export type HermesApprovalChoice = "once" | "deny";
 
 export interface HermesApprovalRespondParams {
   readonly session_id: string;
   readonly choice: HermesApprovalChoice;
-  readonly all?: boolean;
 }
 
 export interface HermesApprovalRespondResult {
