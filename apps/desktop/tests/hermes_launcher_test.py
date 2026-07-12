@@ -28,6 +28,8 @@ LAUNCHER = (
     / "opentrad_hermes_launcher.py"
 )
 CANARY = "canary-secret-never-print-0123456789"
+STORED_SESSION_ID = "20260711_120000_abcdef"
+LIVE_SESSION_ID = "deadbeef"
 
 
 def load_launcher() -> types.ModuleType:
@@ -55,11 +57,15 @@ def valid_capability(**overrides: object) -> bytes:
 
 def find_supported_test_python() -> str | None:
     override = os.environ.get("OPENTRAD_TEST_PYTHON")
-    candidates = [override] if override else [
-        shutil.which("python3.13"),
-        shutil.which("python3.12"),
-        shutil.which("python3.11"),
-    ]
+    candidates = (
+        [override]
+        if override
+        else [
+            shutil.which("python3.13"),
+            shutil.which("python3.12"),
+            shutil.which("python3.11"),
+        ]
+    )
     for candidate in candidates:
         if not candidate:
             continue
@@ -84,13 +90,23 @@ def rpc_line(
     request_id: object = 1,
     params: dict[str, object] | None = None,
 ) -> bytes:
+    if params is None:
+        params = {
+            "session.create": {},
+            "session.resume": {"session_id": STORED_SESSION_ID},
+            "session.status": {"session_id": LIVE_SESSION_ID},
+            "session.close": {"session_id": LIVE_SESSION_ID},
+            "session.interrupt": {"session_id": LIVE_SESSION_ID},
+            "prompt.submit": {"session_id": LIVE_SESSION_ID, "text": "continue"},
+            "approval.respond": {"session_id": LIVE_SESSION_ID, "choice": "once"},
+        }.get(method, {})
     return (
         json.dumps(
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "method": method,
-                "params": {} if params is None else params,
+                "params": params,
             },
             separators=(",", ":"),
         ).encode("utf-8")
@@ -111,7 +127,9 @@ class CapabilityParsingTests(unittest.TestCase):
 
     def test_accepts_the_closed_capability_schema(self) -> None:
         now = int(time.time())
-        capability = self.launcher.parse_capability(valid_capability(expiresAt=now + 30), now=now)
+        capability = self.launcher.parse_capability(
+            valid_capability(expiresAt=now + 30), now=now
+        )
 
         self.assertEqual(capability.model, "openai/gpt-5.2")
         self.assertEqual(capability.api_mode, "chat_completions")
@@ -142,7 +160,9 @@ class CapabilityParsingTests(unittest.TestCase):
 
     def test_rejects_unknown_and_missing_fields(self) -> None:
         now = int(time.time())
-        self.assert_refused(valid_capability(extra="not-allowed", expiresAt=now + 30), now=now)
+        self.assert_refused(
+            valid_capability(extra="not-allowed", expiresAt=now + 30), now=now
+        )
         payload = json.loads(valid_capability(expiresAt=now + 30))
         del payload["model"]
         self.assert_refused(json.dumps(payload).encode(), now=now)
@@ -151,7 +171,9 @@ class CapabilityParsingTests(unittest.TestCase):
         now = int(time.time())
         for version in (0, 2, True, "1"):
             with self.subTest(version=version):
-                self.assert_refused(valid_capability(v=version, expiresAt=now + 30), now=now)
+                self.assert_refused(
+                    valid_capability(v=version, expiresAt=now + 30), now=now
+                )
 
     def test_rejects_expired_or_long_lived_capabilities(self) -> None:
         now = int(time.time())
@@ -183,13 +205,17 @@ class CapabilityParsingTests(unittest.TestCase):
             "雪" * 32,
         ):
             with self.subTest(token_type=type(token).__name__):
-                self.assert_refused(valid_capability(token=token, expiresAt=now + 30), now=now)
+                self.assert_refused(
+                    valid_capability(token=token, expiresAt=now + 30), now=now
+                )
 
     def test_rejects_invalid_models(self) -> None:
         now = int(time.time())
         for model in ("", "bad model", "/starts-with-slash", "a" * 129, 1234):
             with self.subTest(model=model):
-                self.assert_refused(valid_capability(model=model, expiresAt=now + 30), now=now)
+                self.assert_refused(
+                    valid_capability(model=model, expiresAt=now + 30), now=now
+                )
 
     def test_rejects_invalid_api_modes(self) -> None:
         now = int(time.time())
@@ -262,7 +288,9 @@ class EnvironmentAndDiagnosticsTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.launcher = load_launcher()
 
-    def test_private_environment_redirects_home_and_tmp_and_scrubs_inherited_secrets(self) -> None:
+    def test_private_environment_redirects_home_and_tmp_and_scrubs_inherited_secrets(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root).resolve()
             hermes_home = root / "hermes"
@@ -393,7 +421,9 @@ class PathAndRuntimeTests(unittest.TestCase):
             root = Path(raw_root).resolve()
             launcher, hermes_home, cwd = self.make_paths(root)
             with self.assertRaises(self.launcher.LauncherRefusal):
-                self.launcher.validate_bootstrap_paths(Path("launcher.py"), hermes_home, cwd)
+                self.launcher.validate_bootstrap_paths(
+                    Path("launcher.py"), hermes_home, cwd
+                )
             link = root / "launcher-link.py"
             link.symlink_to(launcher)
             with self.assertRaises(self.launcher.LauncherRefusal):
@@ -440,7 +470,9 @@ class PathAndRuntimeTests(unittest.TestCase):
             with self.assertRaises(self.launcher.LauncherRefusal):
                 self.launcher.validate_bootstrap_paths(launcher, hermes_home, cwd)
 
-    def test_infers_posix_and_windows_venv_site_packages_without_importing_site(self) -> None:
+    def test_infers_posix_and_windows_venv_site_packages_without_importing_site(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root).resolve()
             posix_python = root / "posix" / "bin" / "python3"
@@ -455,11 +487,15 @@ class PathAndRuntimeTests(unittest.TestCase):
             windows_site.mkdir(parents=True)
 
             self.assertEqual(
-                self.launcher.infer_site_packages(posix_python, (3, 14), platform="posix"),
+                self.launcher.infer_site_packages(
+                    posix_python, (3, 14), platform="posix"
+                ),
                 posix_site,
             )
             self.assertEqual(
-                self.launcher.infer_site_packages(windows_python, (3, 14), platform="nt"),
+                self.launcher.infer_site_packages(
+                    windows_python, (3, 14), platform="nt"
+                ),
                 windows_site,
             )
 
@@ -625,7 +661,10 @@ class AuditPolicyTests(unittest.TestCase):
             policy("open", (str(home / "state.db"), "w", 0))
             policy("open", (str(root / "outside.txt"), "r", 0))
             with self.assertRaises(self.launcher.LauncherRefusal):
-                policy("open", (str(root / "outside-os-open.txt"), None, os.O_CREAT | os.O_WRONLY))
+                policy(
+                    "open",
+                    (str(root / "outside-os-open.txt"), None, os.O_CREAT | os.O_WRONLY),
+                )
             with self.assertRaises(self.launcher.LauncherRefusal) as caught:
                 policy("open", (str(root / CANARY), "w", 0))
             self.assertNotIn(CANARY, str(caught.exception))
@@ -687,7 +726,9 @@ class AuditPolicyTests(unittest.TestCase):
             policy("os.truncate", (str(home / "state.db"), 0))
             policy("os.setxattr", (str(home / "state.db"), "user.key", b"value", 0))
 
-    def test_rejects_permission_environment_process_signal_and_subinterpreter_controls(self) -> None:
+    def test_rejects_permission_environment_process_signal_and_subinterpreter_controls(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root).resolve()
             policy, home, _ = self.make_policy(root)
@@ -707,7 +748,9 @@ class AuditPolicyTests(unittest.TestCase):
                     with self.assertRaises(self.launcher.LauncherRefusal):
                         policy(event, args)
 
-    def test_real_hook_preserves_permissions_and_python_and_c_environments(self) -> None:
+    def test_real_hook_preserves_permissions_and_python_and_c_environments(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root).resolve()
             home = root / "hermes"
@@ -877,7 +920,9 @@ os.close(marker_fd)
             check=False,
         )
         if availability.returncode != 0:
-            self.skipTest("_xxsubinterpreters is unavailable on the supported interpreter")
+            self.skipTest(
+                "_xxsubinterpreters is unavailable on the supported interpreter"
+            )
 
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root).resolve()
@@ -917,10 +962,14 @@ print(json.dumps({{'outcome': outcome}}))
 
             self.assertEqual(result.returncode, 78, result.stderr)
             self.assertEqual(result.stdout, "")
-            self.assertEqual(result.stderr, "OpenTrad Hermes launcher refused startup\n")
+            self.assertEqual(
+                result.stderr, "OpenTrad Hermes launcher refused startup\n"
+            )
             self.assertFalse(marker.exists())
 
-    def test_real_audit_hook_blocks_openat_renameat_and_unlinkat_without_side_effects(self) -> None:
+    def test_real_audit_hook_blocks_openat_renameat_and_unlinkat_without_side_effects(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root).resolve()
             home = root / "hermes"
@@ -1151,7 +1200,9 @@ class SafeJsonTransportTests(unittest.TestCase):
             buffer = binary
 
         with mock.patch.object(self.launcher.sys, "stdout", TextStdout()):
-            transport = self.launcher.SafeJsonTransport.capture_stdout(self.capability())
+            transport = self.launcher.SafeJsonTransport.capture_stdout(
+                self.capability()
+            )
             self.assertTrue(transport.write_frame({"captured": True}))
 
         self.assertEqual(json.loads(binary.getvalue()), {"captured": True})
@@ -1171,6 +1222,342 @@ class SafeJsonTransportTests(unittest.TestCase):
         self.assertFalse(output.closed)
 
 
+class RpcPolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.launcher = load_launcher()
+
+    def policy_context(self):
+        return self.launcher.RpcPolicyContext(Path("/opentrad/gateway-cwd"))
+
+    def dispatch(self, method: str, params: dict[str, object]):
+        calls: list[dict[str, object]] = []
+
+        def dispatcher(request: dict[str, object]):
+            calls.append(request)
+            return {"jsonrpc": "2.0", "id": request["id"], "result": {}}
+
+        request = self.launcher.RpcRequest(
+            request_id=17,
+            method=method,
+            params=params,
+        )
+        response = self.launcher.dispatch_rpc_request(
+            request,
+            dispatcher,
+            self.policy_context(),
+        )
+        return response, calls
+
+    def assert_invalid_params(self, method: str, params: dict[str, object]) -> None:
+        response, calls = self.dispatch(method, params)
+
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            response,
+            {
+                "jsonrpc": "2.0",
+                "id": 17,
+                "error": {"code": -32602, "message": "Invalid params"},
+            },
+        )
+        self.assertNotIn(CANARY, json.dumps(response))
+
+    def test_policy_context_is_frozen_and_requires_a_canonical_absolute_path(
+        self,
+    ) -> None:
+        context = self.policy_context()
+
+        self.assertEqual(context.cwd, Path("/opentrad/gateway-cwd"))
+        self.assertFalse(hasattr(context, "__dict__"))
+        with self.assertRaises((AttributeError, TypeError)):
+            context.cwd = Path("/attacker")
+
+        for invalid in (
+            Path("relative/gateway-cwd"),
+            Path("/opentrad/../attacker"),
+            "/opentrad/gateway-cwd",
+        ):
+            with self.subTest(
+                invalid_type=type(invalid).__name__, invalid=str(invalid)
+            ):
+                with self.assertRaises(self.launcher.LauncherRefusal) as caught:
+                    self.launcher.RpcPolicyContext(invalid)
+                self.assertEqual(str(caught.exception), self.launcher.GENERIC_REFUSAL)
+                self.assertNotIn(str(invalid), repr(caught.exception))
+
+    def test_valid_requests_are_normalized_for_the_pinned_gateway_contract(
+        self,
+    ) -> None:
+        cases = [
+            (
+                "session.create",
+                {},
+                {"cwd": "/opentrad/gateway-cwd", "source": "opentrad"},
+            ),
+            (
+                "session.resume",
+                {"session_id": STORED_SESSION_ID},
+                {"session_id": STORED_SESSION_ID},
+            ),
+            (
+                "session.status",
+                {"session_id": LIVE_SESSION_ID},
+                {"session_id": LIVE_SESSION_ID},
+            ),
+            (
+                "session.close",
+                {"session_id": LIVE_SESSION_ID},
+                {"session_id": LIVE_SESSION_ID},
+            ),
+            (
+                "session.interrupt",
+                {"session_id": LIVE_SESSION_ID},
+                {"session_id": LIVE_SESSION_ID},
+            ),
+            (
+                "prompt.submit",
+                {"session_id": LIVE_SESSION_ID, "text": "  continue\n"},
+                {"session_id": LIVE_SESSION_ID, "text": "  continue\n"},
+            ),
+            (
+                "approval.respond",
+                {"session_id": LIVE_SESSION_ID, "choice": "deny"},
+                {"session_id": LIVE_SESSION_ID, "choice": "deny", "all": False},
+            ),
+        ]
+
+        for method, supplied, normalized in cases:
+            with self.subTest(method=method):
+                response, calls = self.dispatch(method, supplied)
+                self.assertEqual(
+                    calls,
+                    [
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 17,
+                            "method": method,
+                            "params": normalized,
+                        }
+                    ],
+                )
+                self.assertEqual(
+                    response,
+                    {"jsonrpc": "2.0", "id": 17, "result": {}},
+                )
+
+    def test_session_create_accepts_only_an_empty_external_object(self) -> None:
+        forbidden = (
+            "cwd",
+            "source",
+            "messages",
+            "title",
+            "parent",
+            "profile",
+            "model",
+            "provider",
+            "reasoning",
+            "fast",
+            "cols",
+            "close_on_disconnect",
+        )
+        for key in forbidden:
+            with self.subTest(key=key):
+                self.assert_invalid_params("session.create", {key: CANARY})
+
+    def test_session_resume_requires_the_exact_stored_session_id_schema(self) -> None:
+        invalid_ids: tuple[object, ...] = (
+            "",
+            "20260711_120000_ABCDEf",
+            "20260711-120000-abcdef",
+            "2026071_120000_abcdef",
+            "20260711_120000_abcde",
+            "20260711_120000_abcdef0",
+            "２０２６０７１１_１２００００_abcdef",
+            True,
+            20260711,
+            CANARY,
+        )
+        for session_id in invalid_ids:
+            with self.subTest(session_id_type=type(session_id).__name__):
+                self.assert_invalid_params(
+                    "session.resume",
+                    {"session_id": session_id},
+                )
+        for forbidden in ("title", "profile", "lazy", "eager", "model", "cols"):
+            with self.subTest(forbidden=forbidden):
+                self.assert_invalid_params(
+                    "session.resume",
+                    {"session_id": STORED_SESSION_ID, forbidden: True},
+                )
+
+    def test_live_session_methods_require_one_lowercase_hex_session_id(self) -> None:
+        methods = (
+            "session.status",
+            "session.close",
+            "session.interrupt",
+        )
+        invalid_ids: tuple[object, ...] = (
+            "",
+            "abcdefg0",
+            "ABCDEF12",
+            "abcdef1",
+            "abcdef123",
+            True,
+            12345678,
+            CANARY,
+        )
+        for method in methods:
+            for session_id in invalid_ids:
+                with self.subTest(
+                    method=method, session_id_type=type(session_id).__name__
+                ):
+                    self.assert_invalid_params(method, {"session_id": session_id})
+            self.assert_invalid_params(
+                method,
+                {"session_id": LIVE_SESSION_ID, "extra": CANARY},
+            )
+
+    def test_prompt_submit_validates_text_without_truncating_or_reflecting_it(
+        self,
+    ) -> None:
+        accepted = "\U0001f642" * 262_144
+        self.assertEqual(len(accepted), self.launcher.MAX_PROMPT_CHARACTERS)
+        self.assertEqual(
+            len(accepted.encode("utf-8")),
+            self.launcher.MAX_PROMPT_UTF8_BYTES,
+        )
+        response, calls = self.dispatch(
+            "prompt.submit",
+            {"session_id": LIVE_SESSION_ID, "text": accepted},
+        )
+        self.assertEqual(response["result"], {})
+        self.assertEqual(calls[0]["params"]["text"], accepted)
+
+        invalid_text: tuple[object, ...] = (
+            "",
+            " \t\n ",
+            "a" * 262_145,
+            "bad-surrogate-\ud800",
+            True,
+            123,
+            CANARY + "-" + "x" * 262_145,
+        )
+        for value in invalid_text:
+            with self.subTest(
+                value_type=type(value).__name__,
+                size=len(value) if isinstance(value, str) else 0,
+            ):
+                self.assert_invalid_params(
+                    "prompt.submit",
+                    {"session_id": LIVE_SESSION_ID, "text": value},
+                )
+        self.assert_invalid_params(
+            "prompt.submit",
+            {"session_id": LIVE_SESSION_ID, "text": "continue", "truncate": True},
+        )
+        with mock.patch.object(self.launcher, "MAX_PROMPT_UTF8_BYTES", 3):
+            self.assert_invalid_params(
+                "prompt.submit",
+                {"session_id": LIVE_SESSION_ID, "text": "\U0001f642"},
+            )
+
+    def test_approval_respond_accepts_only_once_or_deny_and_injects_all_false(
+        self,
+    ) -> None:
+        for choice in ("once", "deny"):
+            with self.subTest(choice=choice):
+                _, calls = self.dispatch(
+                    "approval.respond",
+                    {"session_id": LIVE_SESSION_ID, "choice": choice},
+                )
+                self.assertEqual(
+                    calls[0]["params"],
+                    {"session_id": LIVE_SESSION_ID, "choice": choice, "all": False},
+                )
+
+        for choice in ("always", "allow", "DENY", "", True, CANARY):
+            with self.subTest(choice_type=type(choice).__name__):
+                self.assert_invalid_params(
+                    "approval.respond",
+                    {"session_id": LIVE_SESSION_ID, "choice": choice},
+                )
+        self.assert_invalid_params(
+            "approval.respond",
+            {"session_id": LIVE_SESSION_ID, "choice": "once", "all": True},
+        )
+
+    def test_invalid_parameter_shape_never_reaches_or_leaks_through_dispatch(
+        self,
+    ) -> None:
+        class SecretString(str):
+            pass
+
+        for method, params in (
+            ("session.create", {"secret": CANARY}),
+            ("session.resume", {}),
+            ("session.status", {"session_id": SecretString(LIVE_SESSION_ID)}),
+            ("prompt.submit", {"session_id": LIVE_SESSION_ID}),
+            ("approval.respond", {"session_id": LIVE_SESSION_ID}),
+        ):
+            with self.subTest(method=method):
+                self.assert_invalid_params(method, params)
+
+    def test_proxy_like_requests_and_params_fail_closed_without_running_getters(
+        self,
+    ) -> None:
+        touched: list[str] = []
+
+        class ExplodingRequest:
+            @property
+            def method(self):
+                touched.append("request.method")
+                raise AssertionError(CANARY)
+
+        class ExplodingDict(dict):
+            def __iter__(self):
+                touched.append("params.iter")
+                raise AssertionError(CANARY)
+
+        calls: list[dict[str, object]] = []
+        response = self.launcher.dispatch_rpc_request(
+            ExplodingRequest(),
+            lambda request: calls.append(request),
+            self.policy_context(),
+        )
+        self.assertEqual(
+            response,
+            {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32600, "message": "Invalid Request"},
+            },
+        )
+
+        request = self.launcher.RpcRequest(
+            request_id=19,
+            method="session.create",
+            params=ExplodingDict(),
+        )
+        response = self.launcher.dispatch_rpc_request(
+            request,
+            lambda dispatched: calls.append(dispatched),
+            self.policy_context(),
+        )
+        self.assertEqual(
+            response,
+            {
+                "jsonrpc": "2.0",
+                "id": 19,
+                "error": {"code": -32602, "message": "Invalid params"},
+            },
+        )
+        self.assertEqual(touched, [])
+        self.assertEqual(calls, [])
+        self.assertNotIn("data", response["error"])
+        self.assertNotIn(CANARY, json.dumps(response))
+
+
 class NdjsonLoopTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -1182,6 +1569,9 @@ class NdjsonLoopTests(unittest.TestCase):
             valid_capability(expiresAt=now + 30),
             now=now,
         )
+
+    def policy_context(self):
+        return self.launcher.RpcPolicyContext(Path("/opentrad/gateway-cwd"))
 
     def run_loop(
         self,
@@ -1203,11 +1593,14 @@ class NdjsonLoopTests(unittest.TestCase):
             transport,
             dispatcher,
             default_shutdown if shutdown is None else shutdown,
+            self.policy_context(),
         )
         frames = [json.loads(line) for line in binary_output.getvalue().splitlines()]
         return result, frames, shutdown_calls
 
-    def test_uses_bounded_binary_readline_skips_blanks_and_shuts_down_once_at_eof(self) -> None:
+    def test_uses_bounded_binary_readline_skips_blanks_and_shuts_down_once_at_eof(
+        self,
+    ) -> None:
         class RecordingInput(io.BytesIO):
             def __init__(self, initial: bytes) -> None:
                 super().__init__(initial)
@@ -1218,8 +1611,7 @@ class NdjsonLoopTests(unittest.TestCase):
                 return super().readline(size)
 
         input_stream = RecordingInput(
-            b"\n  \r\n"
-            + rpc_line("session.create", request_id=7, params={"cwd": "/workspace"})
+            b"\n  \r\n" + rpc_line("session.create", request_id=7, params={})
         )
         output = io.BytesIO()
         transport = self.launcher.SafeJsonTransport(output, self.capability())
@@ -1239,6 +1631,7 @@ class NdjsonLoopTests(unittest.TestCase):
             transport,
             dispatcher,
             lambda: shutdown_calls.append("shutdown"),
+            self.policy_context(),
         )
 
         self.assertTrue(result)
@@ -1253,7 +1646,10 @@ class NdjsonLoopTests(unittest.TestCase):
                     "jsonrpc": "2.0",
                     "id": 7,
                     "method": "session.create",
-                    "params": {"cwd": "/workspace"},
+                    "params": {
+                        "cwd": "/opentrad/gateway-cwd",
+                        "source": "opentrad",
+                    },
                 }
             ],
         )
@@ -1272,7 +1668,9 @@ class NdjsonLoopTests(unittest.TestCase):
             {"jsonrpc": "2.0", "id": 7, "result": {"created": True}},
         )
 
-    def test_whitelist_is_exact_and_unknown_methods_never_reach_dispatcher(self) -> None:
+    def test_whitelist_is_exact_and_unknown_methods_never_reach_dispatcher(
+        self,
+    ) -> None:
         expected = {
             "session.create",
             "session.resume",
@@ -1303,7 +1701,7 @@ class NdjsonLoopTests(unittest.TestCase):
                     "jsonrpc": "2.0",
                     "id": "known",
                     "method": "session.status",
-                    "params": {},
+                    "params": {"session_id": LIVE_SESSION_ID},
                 }
             ],
         )
@@ -1320,7 +1718,11 @@ class NdjsonLoopTests(unittest.TestCase):
             method="terminal.execute",
             params={},
         )
-        direct = self.launcher.dispatch_rpc_request(crafted, dispatcher)
+        direct = self.launcher.dispatch_rpc_request(
+            crafted,
+            dispatcher,
+            self.policy_context(),
+        )
         self.assertEqual(
             direct["error"],
             {"code": -32601, "message": "Method not found"},
@@ -1329,27 +1731,31 @@ class NdjsonLoopTests(unittest.TestCase):
 
         original = self.launcher.RpcRequest(
             request_id=10,
-            method="session.status",
-            params={"nested": {"value": 1}},
+            method="prompt.submit",
+            params={"session_id": LIVE_SESSION_ID, "text": "original"},
         )
 
         def mutating_dispatcher(request: dict[str, object]):
             request["method"] = "terminal.execute"
             request_params = request["params"]
             assert isinstance(request_params, dict)
-            nested = request_params["nested"]
-            assert isinstance(nested, dict)
-            nested["value"] = 2
+            request_params["text"] = "mutated"
             return {"jsonrpc": "2.0", "id": request["id"], "result": {}}
 
-        self.launcher.dispatch_rpc_request(original, mutating_dispatcher)
-        self.assertEqual(original.method, "session.status")
-        self.assertEqual(original.params, {"nested": {"value": 1}})
+        self.launcher.dispatch_rpc_request(
+            original,
+            mutating_dispatcher,
+            self.policy_context(),
+        )
+        self.assertEqual(original.method, "prompt.submit")
+        self.assertEqual(
+            original.params,
+            {"session_id": LIVE_SESSION_ID, "text": "original"},
+        )
 
     def test_parse_duplicate_and_invalid_requests_use_fixed_errors(self) -> None:
         duplicate = (
-            b'{"jsonrpc":"2.0","id":1,"id":2,'
-            b'"method":"session.status","params":{}}\n'
+            b'{"jsonrpc":"2.0","id":1,"id":2,"method":"session.status","params":{}}\n'
         )
         invalid_requests = [
             b"[]\n",
@@ -1358,7 +1764,6 @@ class NdjsonLoopTests(unittest.TestCase):
             rpc_line("session.status", request_id=9_007_199_254_740_992),
             rpc_line("session.status", request_id="x" * 129),
             b'{"jsonrpc":"2.0","id":1,"method":"","params":{}}\n',
-            b'{"jsonrpc":"2.0","id":1,"method":"session.status","params":[]}\n',
         ]
         calls: list[str] = []
         result, frames, _ = self.run_loop(
@@ -1378,6 +1783,35 @@ class NdjsonLoopTests(unittest.TestCase):
             [{"code": -32600, "message": "Invalid Request"}] * len(invalid_requests),
         )
         self.assertTrue(all(frame["id"] is None for frame in frames[1:]))
+
+    def test_non_object_method_params_use_fixed_invalid_params_without_dispatch(
+        self,
+    ) -> None:
+        requests = b"".join(
+            (
+                b'{"jsonrpc":"2.0","id":11,"method":"session.create","params":[]}\n',
+                b'{"jsonrpc":"2.0","id":12,"method":"session.status","params":null}\n',
+                b'{"jsonrpc":"2.0","id":13,"method":"prompt.submit","params":"'
+                + CANARY.encode("ascii")
+                + b'"}\n',
+            )
+        )
+        calls: list[dict[str, object]] = []
+
+        result, frames, shutdown_calls = self.run_loop(
+            requests,
+            lambda request: calls.append(request),
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(calls, [])
+        self.assertEqual(shutdown_calls, ["shutdown"])
+        self.assertEqual([frame["id"] for frame in frames[1:]], [11, 12, 13])
+        self.assertEqual(
+            [frame["error"] for frame in frames[1:]],
+            [{"code": -32602, "message": "Invalid params"}] * 3,
+        )
+        self.assertNotIn(CANARY, json.dumps(frames))
 
     def test_rejects_unsafe_and_nonfinite_json_numbers_without_crashing(self) -> None:
         huge_integer = b"9" * 5_000
@@ -1404,24 +1838,27 @@ class NdjsonLoopTests(unittest.TestCase):
             [frame["error"] for frame in frames[1:5]],
             [{"code": -32700, "message": "Parse error"}] * 4,
         )
+        self.assertEqual(calls, [])
         self.assertEqual(
-            calls,
-            [
-                {
-                    "jsonrpc": "2.0",
-                    "id": 5,
-                    "method": "session.status",
-                    "params": {"n": 1.25},
-                }
-            ],
+            frames[5],
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "error": {"code": -32602, "message": "Invalid params"},
+            },
         )
-        self.assertEqual(frames[5], {"jsonrpc": "2.0", "id": 5, "result": {}})
 
     def test_rejects_lone_surrogates_in_nested_keys_and_values(self) -> None:
         requests = (
             b'{"jsonrpc":"2.0","id":1,"method":"session.status","params":{"value":"\\ud800"}}\n'
             b'{"jsonrpc":"2.0","id":2,"method":"session.status","params":{"\\udfff":true}}\n'
-            + rpc_line("session.status", request_id=3, params={"value": "正常"})
+            + rpc_line(
+                "prompt.submit",
+                request_id=3,
+                params={"session_id": LIVE_SESSION_ID, "text": "正常"},
+            )
+            + b'{"jsonrpc":"2.0","id":4,"method":"prompt.submit",'
+            b'"params":{"session_id":"deadbeef","text":"\\ud800"}}\n'
         )
         calls: list[dict[str, object]] = []
 
@@ -1435,7 +1872,7 @@ class NdjsonLoopTests(unittest.TestCase):
         self.assertEqual(shutdown_calls, ["shutdown"])
         self.assertEqual(
             [frame["error"] for frame in frames[1:3]],
-            [{"code": -32700, "message": "Parse error"}] * 2,
+            [{"code": -32602, "message": "Invalid params"}] * 2,
         )
         self.assertEqual(
             calls,
@@ -1443,10 +1880,18 @@ class NdjsonLoopTests(unittest.TestCase):
                 {
                     "jsonrpc": "2.0",
                     "id": 3,
-                    "method": "session.status",
-                    "params": {"value": "正常"},
+                    "method": "prompt.submit",
+                    "params": {"session_id": LIVE_SESSION_ID, "text": "正常"},
                 }
             ],
+        )
+        self.assertEqual(
+            frames[4],
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "error": {"code": -32602, "message": "Invalid params"},
+            },
         )
 
     def test_enforces_exact_nesting_limit_and_handles_parser_recursion(self) -> None:
@@ -1470,18 +1915,27 @@ class NdjsonLoopTests(unittest.TestCase):
         )
 
         self.assertTrue(result)
-        self.assertEqual(calls, [1, 4])
+        self.assertEqual(calls, [4])
         self.assertEqual(shutdown_calls, ["shutdown"])
         self.assertEqual(
-            frames[1:],
+            frames[1:4],
             [
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32602, "message": "Invalid params"},
+                },
                 {
                     "jsonrpc": "2.0",
                     "id": None,
                     "error": {"code": -32700, "message": "Parse error"},
-                }
-            ]
-            * 2,
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": "Parse error"},
+                },
+            ],
         )
 
     def test_server_dispatch_is_bound_through_a_two_argument_closure(self) -> None:
@@ -1557,6 +2011,7 @@ class NdjsonLoopTests(unittest.TestCase):
             transport,
             dispatcher,
             lambda: None,
+            self.policy_context(),
         )
         allow_late_write.set()
         for worker in workers:
@@ -1602,7 +2057,10 @@ class NdjsonLoopTests(unittest.TestCase):
         ]
 
         for input_stream, transport in cases:
-            with self.subTest(input_type=type(input_stream).__name__, writes=transport.write_calls):
+            with self.subTest(
+                input_type=type(input_stream).__name__, writes=transport.write_calls
+            ):
+
                 def shutdown() -> None:
                     transport.order.append("shutdown")
 
@@ -1611,6 +2069,7 @@ class NdjsonLoopTests(unittest.TestCase):
                     transport,
                     lambda _request: None,
                     shutdown,
+                    self.policy_context(),
                 )
                 self.assertEqual(transport.close_calls, 1)
                 self.assertEqual(transport.order, ["shutdown", "close"])
@@ -1659,7 +2118,9 @@ class NdjsonLoopTests(unittest.TestCase):
         self.assertNotIn(CANARY, rendered)
         self.assertNotIn("dispatcher exploded", rendered)
 
-    def test_oversize_input_emits_fixed_failure_terminates_and_never_dispatches(self) -> None:
+    def test_oversize_input_emits_fixed_failure_terminates_and_never_dispatches(
+        self,
+    ) -> None:
         oversized = b"x" * (self.launcher.MAX_NDJSON_FRAME_BYTES + 1)
         calls: list[str] = []
         result, frames, shutdown_calls = self.run_loop(
@@ -1680,10 +2141,14 @@ class NdjsonLoopTests(unittest.TestCase):
             },
         )
 
-    def test_ready_write_failure_terminates_without_reading_and_shutdown_runs_once(self) -> None:
+    def test_ready_write_failure_terminates_without_reading_and_shutdown_runs_once(
+        self,
+    ) -> None:
         class ExplodingInput:
             def readline(self, _size: int) -> bytes:
-                raise AssertionError("input must not be read when ready cannot be written")
+                raise AssertionError(
+                    "input must not be read when ready cannot be written"
+                )
 
         class RejectingTransport:
             def __init__(self) -> None:
@@ -1700,6 +2165,7 @@ class NdjsonLoopTests(unittest.TestCase):
             transport,
             lambda _request: (_ for _ in ()).throw(AssertionError("dispatch")),
             lambda: shutdown_calls.append("shutdown"),
+            self.policy_context(),
         )
 
         self.assertFalse(result)
@@ -1713,14 +2179,18 @@ class SourceBoundaryTests(unittest.TestCase):
         imported_roots: set[str] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                imported_roots.update(alias.name.partition(".")[0] for alias in node.names)
+                imported_roots.update(
+                    alias.name.partition(".")[0] for alias in node.names
+                )
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported_roots.add(node.module.partition(".")[0])
 
         allowed = set(sys.stdlib_module_names) | {"__future__"}
         self.assertEqual(imported_roots - allowed, set())
 
-    def test_source_does_not_import_hermes_or_offer_a_test_mode_escape_hatch(self) -> None:
+    def test_source_does_not_import_hermes_or_offer_a_test_mode_escape_hatch(
+        self,
+    ) -> None:
         source = LAUNCHER.read_text(encoding="utf-8")
         self.assertNotIn("import tui_gateway", source)
         self.assertNotIn("import hermes", source)

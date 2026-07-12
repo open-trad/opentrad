@@ -50,6 +50,10 @@ MAX_RPC_ID_STRING_CHARACTERS = 128
 MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
 MAX_JSON_INTEGER_DIGITS = 64
 MAX_JSON_NESTING_DEPTH = 128
+MAX_PROMPT_CHARACTERS = 262_144
+MAX_PROMPT_UTF8_BYTES = 1024 * 1024
+STORED_SESSION_ID_PATTERN = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{6}$", re.ASCII)
+LIVE_SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{8}$")
 ALLOWED_RPC_METHODS = frozenset(
     {
         "session.create",
@@ -178,7 +182,31 @@ class BootstrapState:
 class RpcRequest:
     request_id: int | str
     method: str
-    params: dict[str, object]
+    params: object
+
+
+@dataclass(frozen=True, slots=True)
+class RpcPolicyContext:
+    """Trusted immutable values injected into the pinned gateway contract."""
+
+    cwd: Path
+
+    def __post_init__(self) -> None:
+        try:
+            cwd = self.cwd
+            if not isinstance(cwd, Path):
+                _reject("rpc_policy_cwd")
+            canonical = Path(os.path.normpath(os.fspath(cwd)))
+            if (
+                not cwd.is_absolute()
+                or cwd != canonical
+                or not _is_strict_utf8(str(cwd))
+            ):
+                _reject("rpc_policy_cwd")
+        except LauncherRefusal:
+            raise
+        except (OSError, RuntimeError, TypeError, ValueError):
+            _reject("rpc_policy_cwd")
 
 
 class SafeJsonTransport:
@@ -237,7 +265,11 @@ class SafeJsonTransport:
                 remaining = memoryview(wire)
                 while remaining:
                     written = self._stream.write(remaining)
-                    if type(written) is not int or written <= 0 or written > len(remaining):
+                    if (
+                        type(written) is not int
+                        or written <= 0
+                        or written > len(remaining)
+                    ):
                         return False
                     remaining = remaining[written:]
                 self._stream.flush()
@@ -291,7 +323,10 @@ def _prepare_json_output(payload: object, token: str) -> object:
 
 
 def _normalize_rpc_error(code: object) -> tuple[int, str]:
-    if type(code) is not int or not -MAX_SAFE_JSON_INTEGER <= code <= MAX_SAFE_JSON_INTEGER:
+    if (
+        type(code) is not int
+        or not -MAX_SAFE_JSON_INTEGER <= code <= MAX_SAFE_JSON_INTEGER
+    ):
         code = -32603
     return code, _RPC_ERROR_MESSAGES.get(code, _UNKNOWN_RPC_ERROR_MESSAGE)
 
@@ -308,7 +343,9 @@ def _redact_json_value(value: object, token: str, active: set[int]) -> object:
         active.add(identity)
         try:
             return {
-                (key.replace(token, "<redacted>") if isinstance(key, str) else key): _redact_json_value(
+                (
+                    key.replace(token, "<redacted>") if isinstance(key, str) else key
+                ): _redact_json_value(
                     item,
                     token,
                     active,
@@ -363,6 +400,10 @@ class _InvalidJsonValue(ValueError):
     pass
 
 
+class _InvalidRpcParams(ValueError):
+    pass
+
+
 def _reject_json_constant(_value: str) -> NoReturn:
     raise _InvalidJsonValue()
 
@@ -403,7 +444,12 @@ def parse_rpc_request(frame: bytes) -> RpcRequest:
     except (UnicodeDecodeError, ValueError, OverflowError, RecursionError):
         raise _RpcFrameError(-32700) from None
 
-    if not isinstance(payload, dict) or set(payload) != {"jsonrpc", "id", "method", "params"}:
+    if not isinstance(payload, dict) or set(payload) != {
+        "jsonrpc",
+        "id",
+        "method",
+        "params",
+    }:
         raise _RpcFrameError(-32600)
     request_id = payload["id"]
     method = payload["method"]
@@ -412,10 +458,8 @@ def parse_rpc_request(frame: bytes) -> RpcRequest:
         raise _RpcFrameError(-32600)
     if not isinstance(method, str) or len(method) == 0 or not _is_strict_utf8(method):
         raise _RpcFrameError(-32600)
-    if not isinstance(params, dict):
-        raise _RpcFrameError(-32600)
     try:
-        normalized_params = _copy_json_object(params)
+        normalized_params = _copy_json_value(params, 0)
     except (ValueError, RecursionError):
         raise _RpcFrameError(-32700) from None
     return RpcRequest(
@@ -429,7 +473,7 @@ def _is_valid_rpc_id(value: object) -> bool:
     if type(value) is int:
         return -MAX_SAFE_JSON_INTEGER <= value <= MAX_SAFE_JSON_INTEGER
     return (
-        isinstance(value, str)
+        type(value) is str
         and len(value) <= MAX_RPC_ID_STRING_CHARACTERS
         and _is_strict_utf8(value)
     )
@@ -451,7 +495,7 @@ def _copy_json_object(
         raise _InvalidJsonValue()
     copied: dict[str, object] = {}
     for key, item in value.items():
-        if not isinstance(key, str) or not _is_strict_utf8(key):
+        if not isinstance(key, str):
             raise _InvalidJsonValue()
         copied[key] = _copy_json_value(item, depth + 1)
     return copied
@@ -461,8 +505,6 @@ def _copy_json_value(value: object, depth: int) -> object:
     if value is None or type(value) is bool:
         return value
     if isinstance(value, str):
-        if not _is_strict_utf8(value):
-            raise _InvalidJsonValue()
         return value
     if type(value) is int:
         if not -MAX_SAFE_JSON_INTEGER <= value <= MAX_SAFE_JSON_INTEGER:
@@ -483,7 +525,9 @@ def _copy_json_value(value: object, depth: int) -> object:
     raise _InvalidJsonValue()
 
 
-def _rpc_error_response(code: int, request_id: int | str | None = None) -> dict[str, object]:
+def _rpc_error_response(
+    code: int, request_id: int | str | None = None
+) -> dict[str, object]:
     normalized_code, message = _normalize_rpc_error(code)
     return {
         "jsonrpc": "2.0",
@@ -495,28 +539,123 @@ def _rpc_error_response(code: int, request_id: int | str | None = None) -> dict[
     }
 
 
+def _require_exact_rpc_keys(
+    params: object,
+    expected: frozenset[str],
+) -> None:
+    if type(params) is not dict or set(params) != expected:
+        raise _InvalidRpcParams()
+
+
+def _require_session_id(value: object, pattern: re.Pattern[str]) -> str:
+    if type(value) is not str or pattern.fullmatch(value) is None:
+        raise _InvalidRpcParams()
+    return value
+
+
+def _normalize_rpc_params(
+    method: str,
+    params: object,
+    policy_context: RpcPolicyContext,
+) -> dict[str, object]:
+    if type(policy_context) is not RpcPolicyContext:
+        raise _InvalidRpcParams()
+
+    if method == "session.create":
+        _require_exact_rpc_keys(params, frozenset())
+        return {"cwd": str(policy_context.cwd), "source": "opentrad"}
+
+    if method == "session.resume":
+        _require_exact_rpc_keys(params, frozenset({"session_id"}))
+        return {
+            "session_id": _require_session_id(
+                params["session_id"],
+                STORED_SESSION_ID_PATTERN,
+            )
+        }
+
+    if method in {"session.status", "session.close", "session.interrupt"}:
+        _require_exact_rpc_keys(params, frozenset({"session_id"}))
+        return {
+            "session_id": _require_session_id(
+                params["session_id"],
+                LIVE_SESSION_ID_PATTERN,
+            )
+        }
+
+    if method == "prompt.submit":
+        _require_exact_rpc_keys(params, frozenset({"session_id", "text"}))
+        session_id = _require_session_id(
+            params["session_id"],
+            LIVE_SESSION_ID_PATTERN,
+        )
+        text = params["text"]
+        if type(text) is not str or len(text) > MAX_PROMPT_CHARACTERS:
+            raise _InvalidRpcParams()
+        try:
+            encoded_text = text.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            raise _InvalidRpcParams() from None
+        if not text.strip() or len(encoded_text) > MAX_PROMPT_UTF8_BYTES:
+            raise _InvalidRpcParams()
+        return {"session_id": session_id, "text": text}
+
+    if method == "approval.respond":
+        _require_exact_rpc_keys(params, frozenset({"session_id", "choice"}))
+        session_id = _require_session_id(
+            params["session_id"],
+            LIVE_SESSION_ID_PATTERN,
+        )
+        choice = params["choice"]
+        if type(choice) is not str or choice not in {"once", "deny"}:
+            raise _InvalidRpcParams()
+        return {"session_id": session_id, "choice": choice, "all": False}
+
+    raise _InvalidRpcParams()
+
+
 def dispatch_rpc_request(
     request: RpcRequest,
     dispatcher: RpcDispatcher,
+    policy_context: RpcPolicyContext,
 ) -> dict[str, object] | None:
-    """Apply the second method allowlist before invoking a trusted dispatcher closure."""
+    """Apply the method and parameter policy before calling the gateway."""
 
-    if request.method not in ALLOWED_RPC_METHODS:
-        return _rpc_error_response(-32601, request.request_id)
+    if type(request) is not RpcRequest:
+        return _rpc_error_response(-32600)
+    request_id = request.request_id
+    method = request.method
+    params = request.params
+    if (
+        not _is_valid_rpc_id(request_id)
+        or type(method) is not str
+        or not _is_strict_utf8(method)
+    ):
+        return _rpc_error_response(-32600)
+    if method not in ALLOWED_RPC_METHODS:
+        return _rpc_error_response(-32601, request_id)
+    try:
+        normalized_params = _normalize_rpc_params(
+            method,
+            params,
+            policy_context,
+        )
+    except BaseException:
+        return _rpc_error_response(-32602, request_id)
     try:
         normalized_request: dict[str, object] = {
             "jsonrpc": "2.0",
-            "id": request.request_id,
-            "method": request.method,
-            "params": _copy_json_object(request.params),
+            "id": request_id,
+            "method": method,
+            "params": normalized_params,
         }
         response = dispatcher(normalized_request)
     except BaseException:
-        return _rpc_error_response(-32603, request.request_id)
+        return _rpc_error_response(-32603, request_id)
     if response is None:
         return None
     if not isinstance(response, dict):
-        return _rpc_error_response(-32603, request.request_id)
+        return _rpc_error_response(-32603, request_id)
     return response
 
 
@@ -525,6 +664,7 @@ def run_ndjson_loop(
     transport: SafeJsonTransport,
     dispatcher: RpcDispatcher,
     shutdown: Callable[[], object],
+    policy_context: RpcPolicyContext,
 ) -> bool:
     """Run the owned loop and close output after shutdown on every exit.
 
@@ -559,7 +699,7 @@ def run_ndjson_loop(
             if request.method not in ALLOWED_RPC_METHODS:
                 response = _rpc_error_response(-32601, request.request_id)
             else:
-                response = dispatch_rpc_request(request, dispatcher)
+                response = dispatch_rpc_request(request, dispatcher, policy_context)
             if response is not None and not transport.write_frame(response):
                 return False
     finally:
@@ -581,7 +721,12 @@ def parse_capability(raw: bytes, *, now: int | None = None) -> Capability:
     try:
         text = raw.decode("utf-8", errors="strict")
         payload = json.loads(text, object_pairs_hook=_pairs_without_duplicates)
-    except (UnicodeDecodeError, json.JSONDecodeError, _DuplicateCapabilityKey, RecursionError):
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        _DuplicateCapabilityKey,
+        RecursionError,
+    ):
         _reject("capability_encoding")
 
     if not isinstance(payload, dict) or set(payload) != CAPABILITY_FIELDS:
@@ -601,7 +746,10 @@ def parse_capability(raw: bytes, *, now: int | None = None) -> Capability:
         _reject("capability_version")
     if type(expires_at) is not int:
         _reject("capability_expiry")
-    if expires_at <= current_time or expires_at > current_time + CAPABILITY_MAX_LIFETIME_SECONDS:
+    if (
+        expires_at <= current_time
+        or expires_at > current_time + CAPABILITY_MAX_LIFETIME_SECONDS
+    ):
         _reject("capability_expiry")
     if not _valid_token(token):
         _reject("capability_token")
@@ -642,7 +790,9 @@ def read_capability_fd(
         os.set_blocking(fd, False)
         selector = selectors.DefaultSelector()
         selector.register(fd, selectors.EVENT_READ)
-        bounded_timeout = min(max(float(timeout_seconds), 0.001), CAPABILITY_READ_TIMEOUT_SECONDS)
+        bounded_timeout = min(
+            max(float(timeout_seconds), 0.001), CAPABILITY_READ_TIMEOUT_SECONDS
+        )
         deadline = monotonic() + bounded_timeout
 
         while True:
@@ -816,7 +966,12 @@ def infer_site_packages(
             if executable.parent.name != "bin":
                 _reject("runtime_path")
             runtime_root = executable.parent.parent
-            candidate = runtime_root / "lib" / f"python{version[0]}.{version[1]}" / "site-packages"
+            candidate = (
+                runtime_root
+                / "lib"
+                / f"python{version[0]}.{version[1]}"
+                / "site-packages"
+            )
         else:
             _reject("runtime_platform")
 
@@ -838,7 +993,9 @@ def infer_site_packages(
     return site_packages
 
 
-def activate_site_packages(site_packages: Path, sys_path: list[str] | None = None) -> None:
+def activate_site_packages(
+    site_packages: Path, sys_path: list[str] | None = None
+) -> None:
     """Append a validated directory without processing .pth or sitecustomize.
 
     The isolated interpreter's standard-library paths must stay ahead of the
@@ -928,9 +1085,13 @@ class AuditPolicy:
         path = args[0]
         mode = args[1] if len(args) > 1 else None
         flags = args[2] if len(args) > 2 else 0
-        writes = isinstance(mode, str) and any(character in mode for character in "wax+")
+        writes = isinstance(mode, str) and any(
+            character in mode for character in "wax+"
+        )
         if type(flags) is int:
-            write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+            write_flags = (
+                os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+            )
             writes = writes or bool(flags & write_flags)
         if writes:
             self._require_private_write(path)
@@ -949,7 +1110,9 @@ class AuditPolicy:
 
 
 def install_audit_policy(paths: BootstrapPaths, capability: Capability) -> AuditPolicy:
-    policy = AuditPolicy(paths.hermes_home, paths.cwd, broker_port=capability.broker_port)
+    policy = AuditPolicy(
+        paths.hermes_home, paths.cwd, broker_port=capability.broker_port
+    )
     sys.addaudithook(policy)
     return policy
 
@@ -969,7 +1132,12 @@ def verify_interpreter_contract() -> None:
     ):
         _reject("interpreter_version")
     flags = sys.flags
-    if not flags.isolated or not flags.no_site or not sys.dont_write_bytecode or not flags.utf8_mode:
+    if (
+        not flags.isolated
+        or not flags.no_site
+        or not sys.dont_write_bytecode
+        or not flags.utf8_mode
+    ):
         _reject("interpreter_flags")
     if not getattr(sys.stdout, "write_through", False):
         _reject("interpreter_buffering")
