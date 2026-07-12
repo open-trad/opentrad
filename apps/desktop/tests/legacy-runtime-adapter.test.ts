@@ -9,12 +9,13 @@ describe("LegacyRuntimeAdapter", () => {
     const fake = fakeSession("legacy-live-1");
     const factory = vi.fn((_input: RuntimeCreateInput) => fake.handle);
     const adapter = new LegacyRuntimeAdapter(factory);
+    const input = runtimeInput("task-1");
 
     await expect(adapter.ready()).resolves.toEqual({ version: "legacy" });
-    const binding = await adapter.create({ canonicalSessionId: "task-1" });
+    const binding = await adapter.create(input);
 
     expect(adapter.kind).toBe("legacy");
-    expect(factory).toHaveBeenCalledWith({ canonicalSessionId: "task-1" });
+    expect(factory).toHaveBeenCalledWith(input);
     expect(binding).toEqual({
       canonicalSessionId: "task-1",
       liveRuntimeSessionId: "legacy-live-1",
@@ -26,9 +27,9 @@ describe("LegacyRuntimeAdapter", () => {
     const fake = fakeSession("legacy-live-1");
     const factory = vi.fn(() => fake.handle);
     const adapter = new LegacyRuntimeAdapter(factory);
-    await adapter.create({ canonicalSessionId: "task-1" });
+    await adapter.create(runtimeInput("task-1"));
 
-    await expect(adapter.create({ canonicalSessionId: "task-1" })).rejects.toThrow(
+    await expect(adapter.create(runtimeInput("task-1"))).rejects.toThrow(
       /canonical runtime session already exists: task-1/,
     );
 
@@ -45,9 +46,9 @@ describe("LegacyRuntimeAdapter", () => {
       if (!next) throw new Error("unexpected create");
       return next.handle;
     });
-    const firstBinding = await adapter.create({ canonicalSessionId: "task-1" });
+    const firstBinding = await adapter.create(runtimeInput("task-1"));
 
-    await expect(adapter.create({ canonicalSessionId: "task-2" })).rejects.toThrow(
+    await expect(adapter.create(runtimeInput("task-2"))).rejects.toThrow(
       /live runtime session already exists: legacy-live-1/,
     );
 
@@ -62,7 +63,7 @@ describe("LegacyRuntimeAdapter", () => {
     const event = agentError("legacy-session-1", "provider unavailable");
     const fake = fakeSession("legacy-session-1", async () => fake.emit(event));
     const adapter = new LegacyRuntimeAdapter(() => fake.handle);
-    const binding = await adapter.create({ canonicalSessionId: "legacy-session-1" });
+    const binding = await adapter.create(runtimeInput("legacy-session-1"));
     const received: unknown[] = [];
 
     await adapter.stream(binding, "hello", (runtimeEvent) => received.push(runtimeEvent));
@@ -79,7 +80,7 @@ describe("LegacyRuntimeAdapter", () => {
       throw new Error("send failed");
     });
     const adapter = new LegacyRuntimeAdapter(() => fake.handle);
-    const binding = await adapter.create({ canonicalSessionId: "legacy-session-1" });
+    const binding = await adapter.create(runtimeInput("legacy-session-1"));
 
     await expect(adapter.stream(binding, "hello", () => {})).rejects.toThrow("send failed");
     expect(fake.listenerCount()).toBe(0);
@@ -88,7 +89,7 @@ describe("LegacyRuntimeAdapter", () => {
   it("interrupt aborts the live handle", async () => {
     const fake = fakeSession("legacy-session-1");
     const adapter = new LegacyRuntimeAdapter(() => fake.handle);
-    const binding = await adapter.create({ canonicalSessionId: "legacy-session-1" });
+    const binding = await adapter.create(runtimeInput("legacy-session-1"));
 
     await adapter.interrupt(binding);
 
@@ -98,7 +99,7 @@ describe("LegacyRuntimeAdapter", () => {
   it("close is idempotent and aborts a handle at most once", async () => {
     const fake = fakeSession("legacy-session-1");
     const adapter = new LegacyRuntimeAdapter(() => fake.handle);
-    const binding = await adapter.create({ canonicalSessionId: "legacy-session-1" });
+    const binding = await adapter.create(runtimeInput("legacy-session-1"));
 
     await adapter.close(binding);
     await adapter.close(binding);
@@ -115,9 +116,9 @@ describe("LegacyRuntimeAdapter", () => {
       if (!next) throw new Error("unexpected create");
       return next.handle;
     });
-    const oldBinding = await adapter.create({ canonicalSessionId: "task-old" });
+    const oldBinding = await adapter.create(runtimeInput("task-old"));
     await adapter.close(oldBinding);
-    const newBinding = await adapter.create({ canonicalSessionId: "task-new" });
+    const newBinding = await adapter.create(runtimeInput("task-new"));
 
     await adapter.close(oldBinding);
 
@@ -131,7 +132,7 @@ describe("LegacyRuntimeAdapter", () => {
   it("treats a close binding with mismatched canonical and live IDs as a no-op", async () => {
     const fake = fakeSession("legacy-live-1");
     const adapter = new LegacyRuntimeAdapter(() => fake.handle);
-    const binding = await adapter.create({ canonicalSessionId: "task-1" });
+    const binding = await adapter.create(runtimeInput("task-1"));
 
     await adapter.close({ ...binding, canonicalSessionId: "task-other" });
 
@@ -144,7 +145,7 @@ describe("LegacyRuntimeAdapter", () => {
   it("does not abort twice when close follows interrupt", async () => {
     const fake = fakeSession("legacy-session-1");
     const adapter = new LegacyRuntimeAdapter(() => fake.handle);
-    const binding = await adapter.create({ canonicalSessionId: "legacy-session-1" });
+    const binding = await adapter.create(runtimeInput("legacy-session-1"));
 
     await adapter.interrupt(binding);
     await adapter.close(binding);
@@ -157,7 +158,7 @@ describe("LegacyRuntimeAdapter", () => {
 
     await expect(
       adapter.resume({
-        canonicalSessionId: "legacy-session-1",
+        ...runtimeInput("legacy-session-1"),
         durableRuntimeSessionId: "durable-1",
       }),
     ).rejects.toMatchObject({
@@ -175,8 +176,8 @@ describe("LegacyRuntimeAdapter", () => {
       if (!next) throw new Error("unexpected create");
       return next.handle;
     });
-    await adapter.create({ canonicalSessionId: "legacy-session-1" });
-    await adapter.create({ canonicalSessionId: "legacy-session-2" });
+    await adapter.create(runtimeInput("legacy-session-1"));
+    await adapter.create(runtimeInput("legacy-session-2"));
 
     await adapter.dispose();
     await adapter.dispose();
@@ -225,6 +226,20 @@ function fakeSession(
       for (const listener of listeners) listener(event);
     },
     listenerCount: () => listeners.size,
+  };
+}
+
+function runtimeInput(canonicalSessionId: string): RuntimeCreateInput {
+  return {
+    canonicalSessionId,
+    taskId: canonicalSessionId,
+    runId: `run-${canonicalSessionId}`,
+    workspaceRoot: "/workspace/project",
+    provider: {
+      profileId: "profile-1",
+      model: "claude-sonnet-4",
+      apiMode: "chat_completions",
+    },
   };
 }
 

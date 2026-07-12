@@ -109,7 +109,15 @@ describe("OpenTrad owned launcher request contracts", () => {
         stored_session_id: STORED_SESSION_ID,
         message_count: 0,
         messages: [],
-        info: {},
+        persisted: false,
+        resumable: false,
+        info: {
+          lazy: true,
+          persisted: false,
+          resumable: false,
+          runtime: "hermes-quarantined",
+          state: "quarantined",
+        },
       },
     });
     await expect(request).resolves.toMatchObject({
@@ -182,7 +190,15 @@ describe("OpenTrad owned launcher request contracts", () => {
     const base = {
       message_count: 0,
       messages: [],
-      info: {},
+      persisted: false,
+      resumable: false,
+      info: {
+        lazy: true,
+        persisted: false,
+        resumable: false,
+        runtime: "hermes-quarantined",
+        state: "quarantined",
+      },
     };
 
     expect(
@@ -204,6 +220,22 @@ describe("OpenTrad owned launcher request contracts", () => {
         ...base,
         session_id: LIVE_SESSION_ID,
         stored_session_id: "stored-1",
+      }),
+    ).toBe(false);
+    expect(
+      isValidHermesGatewayRequestResult("session.create", {
+        ...base,
+        session_id: LIVE_SESSION_ID,
+        stored_session_id: STORED_SESSION_ID,
+        message_count: 1,
+      }),
+    ).toBe(false);
+    expect(
+      isValidHermesGatewayRequestResult("session.create", {
+        ...base,
+        session_id: LIVE_SESSION_ID,
+        stored_session_id: STORED_SESSION_ID,
+        messages: [{ role: "assistant" }],
       }),
     ).toBe(false);
   });

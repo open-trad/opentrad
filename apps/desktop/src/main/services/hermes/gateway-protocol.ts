@@ -15,9 +15,17 @@ export type HermesSessionCreateParams = Readonly<Record<string, never>>;
 export interface HermesSessionCreateResult {
   readonly session_id: string;
   readonly stored_session_id: string;
-  readonly message_count: number;
-  readonly messages: readonly unknown[];
-  readonly info: Readonly<Record<string, unknown>>;
+  readonly message_count: 0;
+  readonly messages: readonly [];
+  readonly persisted: false;
+  readonly resumable: false;
+  readonly info: Readonly<Record<string, unknown>> & {
+    readonly lazy: true;
+    readonly persisted: false;
+    readonly resumable: false;
+    readonly runtime: "hermes-quarantined";
+    readonly state: "quarantined";
+  };
 }
 
 export interface HermesSessionResumeParams {

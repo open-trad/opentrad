@@ -10,12 +10,25 @@ export interface RuntimeBinding {
   readonly durableRuntimeSessionId: string | null;
 }
 
-export interface RuntimeCreateInput {
-  readonly canonicalSessionId: string;
+export type RuntimeProviderApiMode = "chat_completions" | "codex_responses";
+
+export interface RuntimeProviderSelection {
+  readonly profileId: string;
+  readonly model: string;
+  readonly apiMode: RuntimeProviderApiMode;
 }
 
-export interface RuntimeResumeInput {
+export interface RuntimeSessionLaunchContext {
   readonly canonicalSessionId: string;
+  readonly taskId: string;
+  readonly runId: string;
+  readonly workspaceRoot: string;
+  readonly provider: RuntimeProviderSelection;
+}
+
+export type RuntimeCreateInput = RuntimeSessionLaunchContext;
+
+export interface RuntimeResumeInput extends RuntimeSessionLaunchContext {
   readonly durableRuntimeSessionId: string;
 }
 

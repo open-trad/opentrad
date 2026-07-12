@@ -40,9 +40,17 @@ const RESULT_VALIDATORS: Readonly<Record<HermesGatewayRequestMethod, Validator>>
     isRecord(value) &&
     isLiveSessionId(value.session_id) &&
     isStoredSessionId(value.stored_session_id) &&
-    isNonNegativeInteger(value.message_count) &&
+    value.message_count === 0 &&
     Array.isArray(value.messages) &&
-    isRecord(value.info),
+    value.messages.length === 0 &&
+    value.persisted === false &&
+    value.resumable === false &&
+    isRecord(value.info) &&
+    value.info.lazy === true &&
+    value.info.persisted === false &&
+    value.info.resumable === false &&
+    value.info.runtime === "hermes-quarantined" &&
+    value.info.state === "quarantined",
   "session.resume": (value) =>
     isRecord(value) &&
     isLiveSessionId(value.session_id) &&
