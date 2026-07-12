@@ -737,7 +737,17 @@ function immediateClient(dispose: () => Promise<void>): HermesSidecarClient & {
 } {
   return {
     ready: async () => {},
+    request: unusedRequest,
+    subscribe: unusedSubscribe,
     dispose: vi.fn(dispose),
     onCrash: () => () => {},
   };
+}
+
+async function unusedRequest(): Promise<never> {
+  throw new Error("unexpected fake sidecar RPC request");
+}
+
+function unusedSubscribe(): () => void {
+  return () => {};
 }

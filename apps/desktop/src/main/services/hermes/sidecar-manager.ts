@@ -7,8 +7,16 @@ import {
   HermesGatewayClient,
   type HermesGatewayClientOptions,
   type HermesGatewayCrashListener,
+  HermesGatewayError,
+  type HermesGatewayNotificationListener,
   type HermesGatewayProcess,
+  HermesGatewayRemoteError,
 } from "./gateway-client";
+import type {
+  HermesGatewayRequestMethod,
+  HermesGatewayRequestParams,
+  HermesGatewayRequestResult,
+} from "./gateway-protocol";
 import { verifyHermesInstallation } from "./installation";
 import {
   ensureHermesStateDirs,
@@ -27,12 +35,14 @@ export type HermesSidecarState = "idle" | "starting" | "ready" | "stopping" | "s
 
 export type HermesSidecarErrorCode =
   | "HERMES_SIDECAR_START"
+  | "HERMES_SIDECAR_NOT_READY"
   | "HERMES_SIDECAR_STOPPED"
   | "HERMES_SIDECAR_CRASHED"
   | "HERMES_SIDECAR_CLEANUP";
 
 const SIDECAR_ERROR_MESSAGES: Readonly<Record<HermesSidecarErrorCode, string>> = {
   HERMES_SIDECAR_START: "Hermes sidecar failed to start",
+  HERMES_SIDECAR_NOT_READY: "Hermes sidecar is not ready",
   HERMES_SIDECAR_STOPPED: "Hermes sidecar startup was stopped",
   HERMES_SIDECAR_CRASHED: "Hermes sidecar process crashed",
   HERMES_SIDECAR_CLEANUP: "Hermes sidecar cleanup could not be confirmed",
@@ -72,6 +82,11 @@ export type HermesSidecarSpawn = (
 
 export interface HermesSidecarClient {
   ready(): Promise<void>;
+  request<TMethod extends HermesGatewayRequestMethod>(
+    method: TMethod,
+    params: HermesGatewayRequestParams<TMethod>,
+  ): Promise<HermesGatewayRequestResult<TMethod>>;
+  subscribe(listener: HermesGatewayNotificationListener): () => void;
   dispose(): Promise<void>;
   onCrash(listener: HermesGatewayCrashListener): () => void;
 }
@@ -142,6 +157,25 @@ interface OwnedCapabilityLease {
   revoke(): void;
 }
 
+interface OwnedSidecarSubscription {
+  active: boolean;
+  rawUnsubscribe: (() => void) | undefined;
+}
+
+interface HermesSidecarRpcGeneration {
+  readonly client: HermesSidecarClient;
+  readonly invalidation: Promise<HermesSidecarError>;
+  readonly invalidate: (error: HermesSidecarError) => void;
+  readonly subscriptions: Set<OwnedSidecarSubscription>;
+  invalidationError: HermesSidecarError | undefined;
+  invalidated: boolean;
+}
+
+type HermesSidecarRequestOutcome =
+  | { readonly kind: "result"; readonly value: unknown }
+  | { readonly kind: "error"; readonly error: unknown }
+  | { readonly kind: "invalidated"; readonly error: HermesSidecarError };
+
 const BINDING_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const BINDING_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const DEFAULT_CAPABILITY_TIMEOUT_MS = 750;
@@ -172,6 +206,7 @@ export class HermesSidecarManager {
   private unsubscribeCrash: (() => void) | undefined;
   private activeCapability: OwnedCapabilityLease | undefined;
   private capabilityPipe: Writable | undefined;
+  private rpcGeneration: HermesSidecarRpcGeneration | undefined;
   private readonly lifecycleQueue: HermesLifecycleCommand[] = [];
   private activeCommand: HermesLifecycleCommand | undefined;
   private lastIntent: HermesLifecycleCommand | undefined;
@@ -257,12 +292,15 @@ export class HermesSidecarManager {
       !this.capabilityPipe
     ) {
       this.currentState = "stopped";
+      this.invalidateRpcGeneration("HERMES_SIDECAR_STOPPED");
       return RESOLVED;
     }
 
     this.cancelReadyIntents();
     this.currentState = "stopping";
-    return this.enqueueLifecycleCommand("stop").promise;
+    const command = this.enqueueLifecycleCommand("stop");
+    this.invalidateRpcGeneration("HERMES_SIDECAR_STOPPED");
+    return command.promise;
   }
 
   restart(): Promise<void> {
@@ -270,7 +308,9 @@ export class HermesSidecarManager {
     if (pendingIntent?.kind === "restart") return pendingIntent.promise;
     this.cancelReadyIntents();
     this.currentState = "stopping";
-    return this.enqueueLifecycleCommand("restart").promise;
+    const command = this.enqueueLifecycleCommand("restart");
+    this.invalidateRpcGeneration("HERMES_SIDECAR_STOPPED");
+    return command.promise;
   }
 
   onCrash(listener: HermesSidecarCrashListener): () => void {
@@ -278,6 +318,154 @@ export class HermesSidecarManager {
     return () => {
       this.crashListeners.delete(listener);
     };
+  }
+
+  async request<TMethod extends HermesGatewayRequestMethod>(
+    method: TMethod,
+    params: HermesGatewayRequestParams<TMethod>,
+  ): Promise<HermesGatewayRequestResult<TMethod>> {
+    const generation = this.requireReadyGeneration();
+    let rawRequest: Promise<HermesGatewayRequestResult<TMethod>>;
+    try {
+      rawRequest = generation.client.request(method, params);
+    } catch (error) {
+      if (!this.isRpcGenerationActive(generation)) {
+        throw this.rpcGenerationError(generation);
+      }
+      throw normalizeRequestError(error);
+    }
+    const response = Promise.resolve(rawRequest).then<
+      HermesSidecarRequestOutcome,
+      HermesSidecarRequestOutcome
+    >(
+      (value) => ({ kind: "result", value }),
+      (error: unknown) => ({ kind: "error", error }),
+    );
+    if (!this.isRpcGenerationActive(generation)) {
+      void response.then(() => {});
+      throw this.rpcGenerationError(generation);
+    }
+    const outcome = await Promise.race<HermesSidecarRequestOutcome>([
+      response,
+      generation.invalidation.then((error) => ({ kind: "invalidated", error })),
+    ]);
+    if (!this.isRpcGenerationActive(generation)) {
+      throw this.rpcGenerationError(generation);
+    }
+    if (outcome.kind === "invalidated") throw outcome.error;
+    if (outcome.kind === "error") throw normalizeRequestError(outcome.error);
+    return outcome.value as HermesGatewayRequestResult<TMethod>;
+  }
+
+  subscribe(listener: HermesGatewayNotificationListener): () => void {
+    const generation = this.requireReadyGeneration();
+    const owned: OwnedSidecarSubscription = {
+      active: true,
+      rawUnsubscribe: undefined,
+    };
+    generation.subscriptions.add(owned);
+    const guardedListener: HermesGatewayNotificationListener = (notification) => {
+      if (!owned.active || !this.isRpcGenerationActive(generation)) return;
+      return listener(notification);
+    };
+    try {
+      const rawUnsubscribe: unknown = generation.client.subscribe(guardedListener);
+      if (typeof rawUnsubscribe !== "function") {
+        throw new HermesGatewayError("HERMES_GATEWAY_PROTOCOL");
+      }
+      owned.rawUnsubscribe = rawUnsubscribe as () => void;
+    } catch (error) {
+      this.releaseSubscription(generation, owned);
+      if (!this.isRpcGenerationActive(generation)) {
+        throw this.rpcGenerationError(generation);
+      }
+      throw normalizeRequestError(error);
+    }
+    if (!this.isRpcGenerationActive(generation)) {
+      const rawUnsubscribe = owned.rawUnsubscribe;
+      owned.rawUnsubscribe = undefined;
+      if (rawUnsubscribe) {
+        try {
+          rawUnsubscribe();
+        } catch {
+          // A reentrant lifecycle transition still owns cleanup of the old subscription.
+        }
+      }
+      throw this.rpcGenerationError(generation);
+    }
+    return () => {
+      this.releaseSubscription(generation, owned);
+    };
+  }
+
+  private requireReadyGeneration(): HermesSidecarRpcGeneration {
+    const generation = this.rpcGeneration;
+    if (
+      this.currentState === "ready" &&
+      this.client &&
+      generation?.client === this.client &&
+      !generation.invalidated
+    ) {
+      return generation;
+    }
+    throw this.rpcStateError();
+  }
+
+  private rpcStateError(): HermesSidecarError {
+    switch (this.currentState) {
+      case "stopping":
+      case "stopped":
+        return new HermesSidecarError("HERMES_SIDECAR_STOPPED");
+      case "crashed":
+        return new HermesSidecarError("HERMES_SIDECAR_CRASHED");
+      default:
+        return new HermesSidecarError("HERMES_SIDECAR_NOT_READY");
+    }
+  }
+
+  private isRpcGenerationActive(generation: HermesSidecarRpcGeneration): boolean {
+    return (
+      !generation.invalidated &&
+      this.rpcGeneration === generation &&
+      this.client === generation.client &&
+      this.currentState === "ready"
+    );
+  }
+
+  private rpcGenerationError(generation: HermesSidecarRpcGeneration): HermesSidecarError {
+    return generation.invalidationError ?? this.rpcStateError();
+  }
+
+  private invalidateRpcGeneration(
+    code: Extract<HermesSidecarErrorCode, "HERMES_SIDECAR_STOPPED" | "HERMES_SIDECAR_CRASHED">,
+  ): void {
+    const generation = this.rpcGeneration;
+    if (!generation || generation.invalidated) return;
+    const error = new HermesSidecarError(code);
+    generation.invalidated = true;
+    generation.invalidationError = error;
+    generation.invalidate(error);
+    for (const subscription of [...generation.subscriptions]) {
+      this.releaseSubscription(generation, subscription);
+    }
+    if (this.rpcGeneration === generation) this.rpcGeneration = undefined;
+  }
+
+  private releaseSubscription(
+    generation: HermesSidecarRpcGeneration,
+    subscription: OwnedSidecarSubscription,
+  ): void {
+    if (!subscription.active) return;
+    subscription.active = false;
+    generation.subscriptions.delete(subscription);
+    const rawUnsubscribe = subscription.rawUnsubscribe;
+    subscription.rawUnsubscribe = undefined;
+    if (!rawUnsubscribe) return;
+    try {
+      rawUnsubscribe();
+    } catch {
+      // Subscription cleanup must never prevent sidecar disposal.
+    }
   }
 
   private enqueueLifecycleCommand(kind: HermesLifecycleCommandKind): HermesLifecycleCommand {
@@ -375,11 +563,13 @@ export class HermesSidecarManager {
         this.terminate = this.emergencyTerminatorFactory(child);
         throw new HermesSidecarError("HERMES_SIDECAR_START");
       }
-      const client = this.clientFactory({
-        process: child,
-        terminate: this.terminate,
-        ...(this.readyTimeoutMs === undefined ? {} : { readyTimeoutMs: this.readyTimeoutMs }),
-      });
+      const client = snapshotSidecarClient(
+        this.clientFactory({
+          process: child,
+          terminate: this.terminate,
+          ...(this.readyTimeoutMs === undefined ? {} : { readyTimeoutMs: this.readyTimeoutMs }),
+        }),
+      );
       this.client = client;
       this.unsubscribeCrash = client.onCrash(() => {
         this.handleCrash(generation);
@@ -402,6 +592,7 @@ export class HermesSidecarManager {
       if (this.crashNotifiedGeneration === generation) {
         throw new HermesSidecarError("HERMES_SIDECAR_CRASHED");
       }
+      this.rpcGeneration = createRpcGeneration(client);
       this.currentState = "ready";
     } catch (cause) {
       let cleanupFailed = false;
@@ -427,6 +618,7 @@ export class HermesSidecarManager {
 
   private async stopOnce(): Promise<void> {
     this.currentState = "stopping";
+    this.invalidateRpcGeneration("HERMES_SIDECAR_STOPPED");
     try {
       if (this.client || this.terminate || this.activeCapability || this.capabilityPipe) {
         await this.cleanupCurrent(this.client);
@@ -440,6 +632,7 @@ export class HermesSidecarManager {
 
   private async cleanupCurrent(expectedClient: HermesSidecarClient | undefined): Promise<void> {
     if (expectedClient && this.client !== expectedClient) return;
+    this.invalidateRpcGeneration("HERMES_SIDECAR_STOPPED");
     const client = this.client;
     const terminate = this.terminate;
     const capability = this.activeCapability;
@@ -600,11 +793,27 @@ export class HermesSidecarManager {
     }
     this.crashNotifiedGeneration = generation;
     this.currentState = "crashed";
+    this.invalidateRpcGeneration("HERMES_SIDECAR_CRASHED");
     const error = new HermesSidecarError("HERMES_SIDECAR_CRASHED");
     for (const listener of [...this.crashListeners]) {
       invokeObserver(listener, error);
     }
   }
+}
+
+function createRpcGeneration(client: HermesSidecarClient): HermesSidecarRpcGeneration {
+  let invalidate!: (error: HermesSidecarError) => void;
+  const invalidation = new Promise<HermesSidecarError>((resolve) => {
+    invalidate = resolve;
+  });
+  return {
+    client,
+    invalidation,
+    invalidate,
+    subscriptions: new Set(),
+    invalidationError: undefined,
+    invalidated: false,
+  };
 }
 
 function createLifecycleCommand(
@@ -797,6 +1006,63 @@ function snapshotCapabilityLease(value: unknown): OwnedCapabilityLease {
       }
     },
   });
+}
+
+function snapshotSidecarClient(value: unknown): HermesSidecarClient {
+  if ((!value || typeof value !== "object") && typeof value !== "function") {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  const receiver = value as object;
+  let ready: unknown;
+  let request: unknown;
+  let subscribe: unknown;
+  let onCrash: unknown;
+  let dispose: unknown;
+  try {
+    ready = Reflect.get(receiver, "ready");
+    request = Reflect.get(receiver, "request");
+    subscribe = Reflect.get(receiver, "subscribe");
+    onCrash = Reflect.get(receiver, "onCrash");
+    dispose = Reflect.get(receiver, "dispose");
+  } catch {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  if (
+    typeof ready !== "function" ||
+    typeof request !== "function" ||
+    typeof subscribe !== "function" ||
+    typeof onCrash !== "function" ||
+    typeof dispose !== "function"
+  ) {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  return Object.freeze({
+    ready: () => Reflect.apply(ready, receiver, []) as Promise<void>,
+    request<TMethod extends HermesGatewayRequestMethod>(
+      method: TMethod,
+      params: HermesGatewayRequestParams<TMethod>,
+    ): Promise<HermesGatewayRequestResult<TMethod>> {
+      return Reflect.apply(request, receiver, [method, params]) as Promise<
+        HermesGatewayRequestResult<TMethod>
+      >;
+    },
+    subscribe: (listener: HermesGatewayNotificationListener) =>
+      Reflect.apply(subscribe, receiver, [listener]) as () => void,
+    onCrash: (listener: HermesGatewayCrashListener) =>
+      Reflect.apply(onCrash, receiver, [listener]) as () => void,
+    dispose: () => Reflect.apply(dispose, receiver, []) as Promise<void>,
+  });
+}
+
+function normalizeRequestError(value: unknown): HermesGatewayError | HermesGatewayRemoteError {
+  try {
+    if (value instanceof HermesGatewayError || value instanceof HermesGatewayRemoteError) {
+      return value;
+    }
+  } catch {
+    // Hostile injected errors are collapsed without inspecting message or cause.
+  }
+  return new HermesGatewayError("HERMES_GATEWAY_PROTOCOL");
 }
 
 function revokeLateCapability(value: unknown): void {

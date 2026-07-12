@@ -82,6 +82,8 @@ describe("HermesSidecarManager FD3 capability lifecycle", () => {
         ready: async () => {
           order.push("ready");
         },
+        request: unusedRequest,
+        subscribe: unusedSubscribe,
         dispose: async () => {},
         onCrash: () => () => {},
       }),
@@ -157,6 +159,8 @@ describe("HermesSidecarManager FD3 capability lifecycle", () => {
       terminatorFactory: () => terminate,
       clientFactory: (options) => ({
         ready: async () => {},
+        request: unusedRequest,
+        subscribe: unusedSubscribe,
         dispose: options.terminate,
         onCrash: () => () => {},
       }),
@@ -182,6 +186,8 @@ describe("HermesSidecarManager FD3 capability lifecycle", () => {
       terminatorFactory: () => terminate,
       clientFactory: (options) => ({
         ready: async () => {},
+        request: unusedRequest,
+        subscribe: unusedSubscribe,
         dispose: options.terminate,
         onCrash: () => () => {},
       }),
@@ -208,6 +214,8 @@ describe("HermesSidecarManager FD3 capability lifecycle", () => {
       terminatorFactory: () => terminate,
       clientFactory: (options) => ({
         ready: async () => {},
+        request: unusedRequest,
+        subscribe: unusedSubscribe,
         dispose: options.terminate,
         onCrash: () => () => {},
       }),
@@ -251,6 +259,8 @@ describe("HermesSidecarManager FD3 capability lifecycle", () => {
       ),
       clientFactory: () => ({
         ready: async () => {},
+        request: unusedRequest,
+        subscribe: unusedSubscribe,
         dispose: async () => {},
         onCrash: (listener) => {
           crash = () => listener({} as never);
@@ -376,9 +386,19 @@ function lease(
 function immediateClient(): HermesSidecarClient {
   return {
     ready: async () => {},
+    request: unusedRequest,
+    subscribe: unusedSubscribe,
     dispose: async () => {},
     onCrash: () => () => {},
   };
+}
+
+async function unusedRequest(): Promise<never> {
+  throw new Error("unexpected fake sidecar RPC request");
+}
+
+function unusedSubscribe(): () => void {
+  return () => {};
 }
 
 function endPipe(pipe: Writable, bytes: Buffer): Promise<void> {
