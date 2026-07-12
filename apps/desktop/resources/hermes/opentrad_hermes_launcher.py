@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""OpenTrad-owned, fail-closed pre-import launcher for Hermes Agent.
+"""OpenTrad-owned, fail-closed launcher for the pinned Hermes quarantine.
 
-This module intentionally stops before importing Hermes.  It establishes and
-tests the boundary that must exist before any third-party module is loaded:
-private paths, a scrubbed environment, a bounded FD capability, no core dumps,
-an explicitly inferred site-packages directory, and an audit policy primitive.
+This module establishes the boundary that must exist before any third-party
+module is loaded: private paths, a scrubbed environment, a bounded FD
+capability, no core dumps, an explicitly inferred site-packages directory, and
+an audit policy primitive.  It then hash-pins and directly compiles the sibling
+OpenTrad runtime before that runtime imports the verified Hermes distribution.
 
 The eventual production invocation is deliberately narrow::
 
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import faulthandler
+import hashlib
 import json
 import math
 import os
@@ -29,6 +31,7 @@ import stat
 import sys
 import threading
 import time
+import types
 from typing import BinaryIO, Callable, MutableMapping, NoReturn, Protocol
 
 
@@ -52,6 +55,12 @@ MAX_JSON_INTEGER_DIGITS = 64
 MAX_JSON_NESTING_DEPTH = 128
 MAX_PROMPT_CHARACTERS = 262_144
 MAX_PROMPT_UTF8_BYTES = 1024 * 1024
+OWNED_RUNTIME_FILENAME = "opentrad_hermes_runtime.py"
+OWNED_RUNTIME_MODULE_NAME = "_opentrad_owned_hermes_runtime_v1"
+OWNED_RUNTIME_MAX_BYTES = 512 * 1024
+OWNED_RUNTIME_SHA256 = (
+    "6e36115f78f35a6d70362c3dd6f06c84b270974851bfdde6260d7a280cf901ad"
+)
 STORED_SESSION_ID_PATTERN = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{6}$", re.ASCII)
 LIVE_SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{8}$")
 ALLOWED_RPC_METHODS = frozenset(
@@ -668,9 +677,11 @@ def run_ndjson_loop(
 ) -> bool:
     """Run the owned loop and close output after shutdown on every exit.
 
-    ``dispatcher`` must be a unary closure returned by :func:`bind_server_dispatch`;
-    passing the pinned gateway's raw ``server.dispatch`` would select its unsafe
-    default stdio transport for asynchronous responses and events.
+    ``dispatcher`` must already be unary and transport-bound.  Native gateway
+    dispatchers require :func:`bind_server_dispatch`; the owned quarantine
+    returns an equivalent guarded unary dispatcher directly.  Passing the
+    pinned gateway's raw ``server.dispatch`` would select its unsafe default
+    stdio transport for asynchronous responses and events.
     """
 
     try:
@@ -1177,6 +1188,165 @@ def bootstrap_pre_import(fd: int = CAPABILITY_FD) -> BootstrapState:
     )
 
 
+def _capture_binary_stdin() -> BinaryIO:
+    """Capture the inherited binary request stream before runtime redirection."""
+
+    stream = getattr(sys.stdin, "buffer", None)
+    if stream is None or not callable(getattr(stream, "readline", None)):
+        _reject("stdin_transport")
+    return stream
+
+
+def _read_owned_runtime_source(runtime_path: Path) -> bytes:
+    """Read one immutable-looking regular file without following a symlink."""
+
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    close_on_exec = getattr(os, "O_CLOEXEC", None)
+    if type(no_follow) is not int or type(close_on_exec) is not int:
+        _reject("owned_runtime_platform")
+
+    descriptor: int | None = None
+    try:
+        lexical = Path(os.path.normpath(os.fspath(runtime_path)))
+        if not runtime_path.is_absolute() or lexical != runtime_path:
+            _reject("owned_runtime_path")
+        before = runtime_path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_mode & 0o022
+            or before.st_mode & 0o400 == 0
+            or before.st_size <= 0
+            or before.st_size > OWNED_RUNTIME_MAX_BYTES
+            or (hasattr(os, "getuid") and before.st_uid != os.getuid())
+        ):
+            _reject("owned_runtime_metadata")
+
+        descriptor = os.open(runtime_path, os.O_RDONLY | no_follow | close_on_exec)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_uid != before.st_uid
+            or opened.st_mode != before.st_mode
+            or opened.st_size != before.st_size
+        ):
+            _reject("owned_runtime_race")
+
+        source = bytearray()
+        while len(source) <= OWNED_RUNTIME_MAX_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(65_536, OWNED_RUNTIME_MAX_BYTES + 1 - len(source)),
+            )
+            if chunk == b"":
+                break
+            source.extend(chunk)
+        after = os.fstat(descriptor)
+        if (
+            len(source) != opened.st_size
+            or len(source) > OWNED_RUNTIME_MAX_BYTES
+            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        ):
+            _reject("owned_runtime_race")
+        return bytes(source)
+    except LauncherRefusal:
+        raise
+    except BaseException:
+        _reject("owned_runtime_read")
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _load_owned_runtime(launcher_path: Path) -> types.ModuleType:
+    """Hash-pin and compile the reviewed sibling runtime without importing pyc."""
+
+    try:
+        canonical_launcher = _canonical_existing_path(
+            launcher_path,
+            directory=False,
+        )
+        launcher_mode = stat.S_IMODE(canonical_launcher.lstat().st_mode)
+        if launcher_mode & 0o022 or launcher_mode & 0o400 == 0:
+            _reject("owned_launcher_metadata")
+        runtime_path = canonical_launcher.with_name(OWNED_RUNTIME_FILENAME)
+        if OWNED_RUNTIME_MODULE_NAME in sys.modules:
+            _reject("owned_runtime_collision")
+        source = _read_owned_runtime_source(runtime_path)
+        if hashlib.sha256(source).hexdigest() != OWNED_RUNTIME_SHA256:
+            _reject("owned_runtime_digest")
+        code = compile(
+            source,
+            str(runtime_path),
+            "exec",
+            flags=0,
+            dont_inherit=True,
+            optimize=0,
+        )
+        module = types.ModuleType(OWNED_RUNTIME_MODULE_NAME)
+        module.__file__ = str(runtime_path)
+        module.__package__ = ""
+        module.__loader__ = None
+        if OWNED_RUNTIME_MODULE_NAME in sys.modules:
+            _reject("owned_runtime_collision")
+        sys.modules[OWNED_RUNTIME_MODULE_NAME] = module
+        try:
+            exec(code, module.__dict__)
+        except BaseException:
+            if sys.modules.get(OWNED_RUNTIME_MODULE_NAME) is module:
+                sys.modules.pop(OWNED_RUNTIME_MODULE_NAME, None)
+            _reject("owned_runtime_execution")
+        if sys.modules.get(OWNED_RUNTIME_MODULE_NAME) is not module:
+            _reject("owned_runtime_registry")
+        return module
+    except LauncherRefusal:
+        raise
+    except BaseException:
+        if (
+            "module" in locals()
+            and sys.modules.get(OWNED_RUNTIME_MODULE_NAME) is module
+        ):
+            sys.modules.pop(OWNED_RUNTIME_MODULE_NAME, None)
+        _reject("owned_runtime_load")
+
+
+def _instantiate_owned_runtime(
+    runtime_module: types.ModuleType,
+    site_packages: Path,
+    transport: SafeJsonTransport,
+) -> object:
+    """Create the exact guarded runtime type exported by the pinned source."""
+
+    try:
+        if (
+            type(runtime_module) is not types.ModuleType
+            or runtime_module.__name__ != OWNED_RUNTIME_MODULE_NAME
+            or sys.modules.get(OWNED_RUNTIME_MODULE_NAME) is not runtime_module
+        ):
+            _reject("owned_runtime_module")
+        loader = getattr(runtime_module, "load_pinned_runtime", None)
+        guarded_type = getattr(runtime_module, "GuardedHermesRuntime", None)
+        if (
+            type(loader) is not types.FunctionType
+            or loader.__module__ != runtime_module.__name__
+            or type(guarded_type) is not type
+            or guarded_type.__module__ != runtime_module.__name__
+        ):
+            _reject("owned_runtime_contract")
+        guarded = loader(site_packages, transport)
+        if type(guarded) is not guarded_type:
+            _reject("owned_runtime_result")
+        return guarded
+    except LauncherRefusal:
+        raise
+    except BaseException:
+        _reject("owned_runtime_start")
+
+
 def _write_generic_refusal() -> None:
     try:
         os.write(2, GENERIC_STDERR)
@@ -1185,14 +1355,50 @@ def _write_generic_refusal() -> None:
 
 
 def main() -> int:
+    transport: SafeJsonTransport | None = None
+    shutdown_callback: Callable[[], object] | None = None
+    loop_started = False
     try:
-        bootstrap_pre_import()
-        # Hermes import, monkeypatching, and the owned NDJSON loop are deliberately
-        # absent until they can be contract-tested against the pinned runtime.
-        _reject("hermes_boundary_incomplete")
+        state = bootstrap_pre_import()
+        input_stream = _capture_binary_stdin()
+        transport = SafeJsonTransport.capture_stdout(state.capability)
+        policy_context = RpcPolicyContext(state.paths.cwd)
+        runtime_module = _load_owned_runtime(state.paths.launcher)
+        guarded = _instantiate_owned_runtime(
+            runtime_module,
+            state.site_packages,
+            transport,
+        )
+        dispatcher = getattr(guarded, "dispatch", None)
+        shutdown = getattr(guarded, "shutdown", None)
+        if not callable(dispatcher) or not callable(shutdown):
+            _reject("owned_runtime_api")
+        shutdown_callback = shutdown
+        loop_started = True
+        if not run_ndjson_loop(
+            input_stream,
+            transport,
+            dispatcher,
+            shutdown_callback,
+            policy_context,
+        ):
+            _reject("owned_runtime_loop")
+        return 0
     except BaseException:
         _write_generic_refusal()
         return EX_CONFIG
+    finally:
+        if not loop_started:
+            if shutdown_callback is not None:
+                try:
+                    shutdown_callback()
+                except BaseException:
+                    pass
+            if transport is not None:
+                try:
+                    transport.close()
+                except BaseException:
+                    pass
 
 
 if __name__ == "__main__":

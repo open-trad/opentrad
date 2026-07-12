@@ -30,6 +30,7 @@ LAUNCHER = (
 CANARY = "canary-secret-never-print-0123456789"
 STORED_SESSION_ID = "20260711_120000_abcdef"
 LIVE_SESSION_ID = "deadbeef"
+REAL_SMOKE_PYTHON = os.environ.get("OPENTRAD_TEST_HERMES_PYTHON")
 
 
 def load_launcher() -> types.ModuleType:
@@ -1556,6 +1557,428 @@ class RpcPolicyTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertNotIn("data", response["error"])
         self.assertNotIn(CANARY, json.dumps(response))
+
+
+class OwnedRuntimeLoaderTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.launcher = load_launcher()
+
+    def tearDown(self) -> None:
+        module_name = getattr(
+            self.launcher,
+            "OWNED_RUNTIME_MODULE_NAME",
+            "_opentrad_owned_hermes_runtime_v1",
+        )
+        sys.modules.pop(module_name, None)
+
+    @staticmethod
+    def make_bundle(root: Path) -> tuple[Path, Path]:
+        launcher_path = root / "opentrad_hermes_launcher.py"
+        runtime_path = root / "opentrad_hermes_runtime.py"
+        shutil.copy2(LAUNCHER, launcher_path)
+        shutil.copy2(
+            LAUNCHER.with_name("opentrad_hermes_runtime.py"),
+            runtime_path,
+        )
+        launcher_path.chmod(0o644)
+        runtime_path.chmod(0o644)
+        return launcher_path, runtime_path
+
+    def assert_refused(self, launcher_path: Path) -> None:
+        with self.assertRaises(self.launcher.LauncherRefusal) as caught:
+            self.launcher._load_owned_runtime(launcher_path)
+        self.assertEqual(str(caught.exception), self.launcher.GENERIC_REFUSAL)
+        self.assertNotIn(CANARY, repr(caught.exception))
+
+    def test_loads_only_the_exact_owned_runtime_source_without_pyc_import(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            launcher_path, runtime_path = self.make_bundle(Path(raw_root).resolve())
+
+            module = self.launcher._load_owned_runtime(launcher_path)
+
+            self.assertEqual(
+                module.__name__,
+                self.launcher.OWNED_RUNTIME_MODULE_NAME,
+            )
+            self.assertEqual(module.__file__, str(runtime_path))
+            self.assertIs(sys.modules[module.__name__], module)
+            self.assertEqual(
+                module.PINNED_HERMES_VERSION,
+                "0.18.2",
+            )
+            self.assertFalse((runtime_path.parent / "__pycache__").exists())
+
+    def test_rejects_tampering_before_executing_any_runtime_source(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root).resolve()
+            launcher_path, runtime_path = self.make_bundle(root)
+            marker = root / "runtime-source-executed"
+            runtime_path.write_bytes(
+                runtime_path.read_bytes()
+                + f"\nPath({str(marker)!r}).write_text({CANARY!r})\n".encode()
+            )
+
+            self.assert_refused(launcher_path)
+
+            self.assertFalse(marker.exists())
+            self.assertNotIn(
+                self.launcher.OWNED_RUNTIME_MODULE_NAME,
+                sys.modules,
+            )
+
+    def test_rejects_symlink_writable_oversize_and_module_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root).resolve()
+
+            with self.subTest(case="symlink"):
+                case_root = root / "symlink"
+                case_root.mkdir()
+                launcher_path, runtime_path = self.make_bundle(case_root)
+                runtime_path.unlink()
+                runtime_path.symlink_to(
+                    LAUNCHER.with_name("opentrad_hermes_runtime.py")
+                )
+                self.assert_refused(launcher_path)
+
+            with self.subTest(case="writable"):
+                case_root = root / "writable"
+                case_root.mkdir()
+                launcher_path, runtime_path = self.make_bundle(case_root)
+                runtime_path.chmod(0o666)
+                self.assert_refused(launcher_path)
+
+            with self.subTest(case="oversize"):
+                case_root = root / "oversize"
+                case_root.mkdir()
+                launcher_path, runtime_path = self.make_bundle(case_root)
+                runtime_path.write_bytes(
+                    b"x" * (self.launcher.OWNED_RUNTIME_MAX_BYTES + 1)
+                )
+                runtime_path.chmod(0o644)
+                self.assert_refused(launcher_path)
+
+            with self.subTest(case="module-collision"):
+                case_root = root / "collision"
+                case_root.mkdir()
+                launcher_path, _runtime_path = self.make_bundle(case_root)
+                sentinel = object()
+                sys.modules[self.launcher.OWNED_RUNTIME_MODULE_NAME] = sentinel
+                self.assert_refused(launcher_path)
+                self.assertIs(
+                    sys.modules[self.launcher.OWNED_RUNTIME_MODULE_NAME],
+                    sentinel,
+                )
+
+
+class LauncherMainTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.launcher = load_launcher()
+
+    @staticmethod
+    def state() -> types.SimpleNamespace:
+        return types.SimpleNamespace(
+            capability=object(),
+            site_packages=Path("/managed/site-packages"),
+            paths=types.SimpleNamespace(
+                launcher=LAUNCHER,
+                cwd=Path("/private/gateway-cwd"),
+            ),
+        )
+
+    def test_binary_stdin_capture_is_mandatory_and_non_reflective(self) -> None:
+        class TextOnlyInput:
+            def __repr__(self) -> str:
+                return CANARY
+
+        with mock.patch.object(self.launcher.sys, "stdin", TextOnlyInput()):
+            with self.assertRaises(self.launcher.LauncherRefusal) as caught:
+                self.launcher._capture_binary_stdin()
+
+        self.assertEqual(str(caught.exception), self.launcher.GENERIC_REFUSAL)
+        self.assertNotIn(CANARY, repr(caught.exception))
+
+    def test_main_wires_bootstrap_owned_runtime_and_loop_in_exact_order(self) -> None:
+        events: list[str] = []
+        state = self.state()
+        input_stream = io.BytesIO(b"")
+
+        class TrackingTransport:
+            def close(self) -> None:
+                events.append("close")
+
+        transport = TrackingTransport()
+
+        class GuardedRuntime:
+            def dispatch(self, _request: dict[str, object]):
+                return None
+
+            def shutdown(self) -> None:
+                events.append("shutdown")
+
+        guarded = GuardedRuntime()
+        runtime_module = object()
+
+        def instantiate_runtime(
+            supplied_module: object,
+            site_packages: Path,
+            supplied_transport: object,
+        ):
+            events.append("instantiate")
+            self.assertIs(supplied_module, runtime_module)
+            self.assertEqual(site_packages, state.site_packages)
+            self.assertIs(supplied_transport, transport)
+            return guarded
+
+        def run_loop(
+            supplied_input: object,
+            supplied_transport: object,
+            dispatcher: object,
+            shutdown: object,
+            policy_context: object,
+        ) -> bool:
+            events.append("loop")
+            self.assertIs(supplied_input, input_stream)
+            self.assertIs(supplied_transport, transport)
+            self.assertEqual(dispatcher, guarded.dispatch)
+            self.assertEqual(shutdown, guarded.shutdown)
+            self.assertEqual(policy_context.cwd, state.paths.cwd)
+            shutdown()
+            supplied_transport.close()
+            return True
+
+        with (
+            mock.patch.object(
+                self.launcher,
+                "bootstrap_pre_import",
+                side_effect=lambda: (events.append("bootstrap"), state)[1],
+            ),
+            mock.patch.object(
+                self.launcher,
+                "_capture_binary_stdin",
+                side_effect=lambda: (events.append("stdin"), input_stream)[1],
+            ),
+            mock.patch.object(
+                self.launcher.SafeJsonTransport,
+                "capture_stdout",
+                side_effect=lambda _capability: (
+                    events.append("stdout"),
+                    transport,
+                )[1],
+            ),
+            mock.patch.object(
+                self.launcher,
+                "_load_owned_runtime",
+                side_effect=lambda launcher_path: (
+                    self.assertEqual(launcher_path, state.paths.launcher),
+                    events.append("load"),
+                    runtime_module,
+                )[2],
+            ),
+            mock.patch.object(
+                self.launcher,
+                "_instantiate_owned_runtime",
+                side_effect=instantiate_runtime,
+            ),
+            mock.patch.object(self.launcher, "run_ndjson_loop", side_effect=run_loop),
+            mock.patch.object(self.launcher, "_write_generic_refusal") as refusal,
+        ):
+            result = self.launcher.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            events,
+            [
+                "bootstrap",
+                "stdin",
+                "stdout",
+                "load",
+                "instantiate",
+                "loop",
+                "shutdown",
+                "close",
+            ],
+        )
+        refusal.assert_not_called()
+
+    def test_main_fails_closed_without_double_cleanup_or_exception_reflection(
+        self,
+    ) -> None:
+        for failure in ("load", "instantiate", "loop"):
+            with self.subTest(failure=failure):
+                close_calls: list[str] = []
+                shutdown_calls: list[str] = []
+                state = self.state()
+
+                class TrackingTransport:
+                    def close(self) -> None:
+                        close_calls.append("close")
+
+                transport = TrackingTransport()
+
+                class GuardedRuntime:
+                    def dispatch(self, _request: dict[str, object]):
+                        return None
+
+                    def shutdown(self) -> None:
+                        shutdown_calls.append("shutdown")
+
+                guarded = GuardedRuntime()
+
+                def instantiate_runtime(
+                    _module: object,
+                    _site: Path,
+                    _transport: object,
+                ):
+                    if failure == "instantiate":
+                        raise RuntimeError(CANARY)
+                    return guarded
+
+                runtime_module = object()
+
+                def load_owned(_launcher_path: Path):
+                    if failure == "load":
+                        raise RuntimeError(CANARY)
+                    return runtime_module
+
+                def run_loop(*_args: object) -> bool:
+                    guarded.shutdown()
+                    transport.close()
+                    if failure == "loop":
+                        return False
+                    return True
+
+                with (
+                    mock.patch.object(
+                        self.launcher,
+                        "bootstrap_pre_import",
+                        return_value=state,
+                    ),
+                    mock.patch.object(
+                        self.launcher,
+                        "_capture_binary_stdin",
+                        return_value=io.BytesIO(),
+                    ),
+                    mock.patch.object(
+                        self.launcher.SafeJsonTransport,
+                        "capture_stdout",
+                        return_value=transport,
+                    ),
+                    mock.patch.object(
+                        self.launcher,
+                        "_load_owned_runtime",
+                        side_effect=load_owned,
+                    ),
+                    mock.patch.object(
+                        self.launcher,
+                        "_instantiate_owned_runtime",
+                        side_effect=instantiate_runtime,
+                    ),
+                    mock.patch.object(
+                        self.launcher,
+                        "run_ndjson_loop",
+                        side_effect=run_loop,
+                    ),
+                    mock.patch.object(
+                        self.launcher,
+                        "_write_generic_refusal",
+                    ) as refusal,
+                ):
+                    result = self.launcher.main()
+
+                self.assertEqual(result, self.launcher.EX_CONFIG)
+                refusal.assert_called_once_with()
+                self.assertLessEqual(len(close_calls), 1)
+                self.assertLessEqual(len(shutdown_calls), 1)
+                if failure == "load":
+                    self.assertEqual(close_calls, ["close"])
+                    self.assertEqual(shutdown_calls, [])
+                elif failure == "instantiate":
+                    self.assertEqual(close_calls, ["close"])
+                    self.assertEqual(shutdown_calls, [])
+                else:
+                    self.assertEqual(close_calls, ["close"])
+                    self.assertEqual(shutdown_calls, ["shutdown"])
+
+    @unittest.skipUnless(
+        os.name == "posix" and REAL_SMOKE_PYTHON,
+        "set OPENTRAD_TEST_HERMES_PYTHON on the macOS Hermes runtime",
+    )
+    def test_real_pinned_wheel_process_emits_ready_and_quarantined_create(
+        self,
+    ) -> None:
+        python = Path(str(REAL_SMOKE_PYTHON))
+        self.assertTrue(python.is_absolute())
+        token = "launcher-real-smoke-token-0123456789abcdef"
+
+        with tempfile.TemporaryDirectory(prefix="opentrad-launcher-smoke-") as raw:
+            home = Path(raw).resolve()
+            home.chmod(0o700)
+            cwd = home / "gateway-cwd"
+            cwd.mkdir(mode=0o700)
+            read_fd, write_fd = os.pipe()
+
+            def prepare_child_fd() -> None:
+                if read_fd != self.launcher.CAPABILITY_FD:
+                    os.dup2(read_fd, self.launcher.CAPABILITY_FD)
+
+            process = subprocess.Popen(
+                [
+                    str(python),
+                    "-I",
+                    "-S",
+                    "-B",
+                    "-u",
+                    "-X",
+                    "utf8",
+                    str(LAUNCHER),
+                ],
+                cwd=cwd,
+                env={"HERMES_HOME": str(home), "LANG": "C.UTF-8"},
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                pass_fds=(read_fd,),
+                preexec_fn=prepare_child_fd,
+            )
+            os.close(read_fd)
+            try:
+                os.write(
+                    write_fd,
+                    valid_capability(
+                        expiresAt=int(time.time()) + 60,
+                        token=token,
+                    ),
+                )
+            finally:
+                os.close(write_fd)
+
+            stdout, stderr = process.communicate(
+                input=rpc_line("session.create", request_id=23, params={}),
+                timeout=20,
+            )
+
+        self.assertEqual(process.returncode, 0, stdout + stderr)
+        self.assertEqual(stderr, b"")
+        self.assertNotIn(token.encode(), stdout + stderr)
+        frames = [json.loads(line) for line in stdout.splitlines()]
+        self.assertEqual(frames[0], self.launcher.READY_ENVELOPE)
+        self.assertEqual(frames[1]["jsonrpc"], "2.0")
+        self.assertEqual(frames[1]["id"], 23)
+        result = frames[1]["result"]
+        self.assertEqual(result["info"]["runtime"], "hermes-quarantined")
+        self.assertEqual(result["info"]["state"], "quarantined")
+        self.assertFalse(result["persisted"])
+        self.assertFalse(result["resumable"])
+        self.assertIsNotNone(
+            self.launcher.LIVE_SESSION_ID_PATTERN.fullmatch(result["session_id"])
+        )
+        self.assertIsNotNone(
+            self.launcher.STORED_SESSION_ID_PATTERN.fullmatch(
+                result["stored_session_id"]
+            )
+        )
 
 
 class NdjsonLoopTests(unittest.TestCase):
