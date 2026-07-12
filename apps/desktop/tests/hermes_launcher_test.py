@@ -468,9 +468,12 @@ class PathAndRuntimeTests(unittest.TestCase):
                 f"import pathlib; pathlib.Path({str(marker)!r}).write_text('bad')\n",
                 encoding="utf-8",
             )
-            sys_path: list[str] = []
+            sys_path = ["/trusted/stdlib", "/trusted/lib-dynload"]
             self.launcher.activate_site_packages(posix_site, sys_path)
-            self.assertEqual(sys_path, [str(posix_site)])
+            self.assertEqual(
+                sys_path,
+                ["/trusted/stdlib", "/trusted/lib-dynload", str(posix_site)],
+            )
             self.assertFalse(marker.exists())
 
     def test_rejects_site_packages_outside_the_interpreter_venv(self) -> None:

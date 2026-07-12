@@ -839,12 +839,16 @@ def infer_site_packages(
 
 
 def activate_site_packages(site_packages: Path, sys_path: list[str] | None = None) -> None:
-    """Prepend a validated directory without processing .pth or sitecustomize."""
+    """Append a validated directory without processing .pth or sitecustomize.
+
+    The isolated interpreter's standard-library paths must stay ahead of the
+    managed runtime so an added site-packages module cannot shadow stdlib.
+    """
 
     target_path = sys.path if sys_path is None else sys_path
     value = str(site_packages)
     if value not in target_path:
-        target_path.insert(0, value)
+        target_path.append(value)
 
 
 class AuditPolicy:
