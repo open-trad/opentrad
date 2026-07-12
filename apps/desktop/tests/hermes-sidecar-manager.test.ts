@@ -1,8 +1,10 @@
 import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
+import { PassThrough, type Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveHermesPaths } from "../src/main/services/hermes/paths";
 import {
+  type HermesSidecarBinding,
+  type HermesSidecarCapabilityLease,
   type HermesSidecarClient,
   HermesSidecarManager,
   type HermesSidecarProcess,
@@ -14,12 +16,22 @@ class FakeSidecarProcess extends EventEmitter implements HermesSidecarProcess {
   readonly stdin = new PassThrough();
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
+  readonly capabilityPipe = new PassThrough();
+  readonly stdio = [this.stdin, this.stdout, this.stderr, this.capabilityPipe] as const;
   readonly pid = 12_345;
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
 }
 
 const paths = resolveHermesPaths("/opentrad-data", "darwin");
+const launcherPath = "/opentrad-app/resources/hermes/opentrad_hermes_launcher.py";
+const binding: HermesSidecarBinding = {
+  taskId: "task-123",
+  runId: "run-456",
+  profileId: "profile-789",
+  model: "openai/gpt-5.2",
+  apiMode: "chat_completions",
+};
 
 afterEach(() => {
   vi.useRealTimers();
@@ -44,8 +56,18 @@ describe("HermesSidecarManager startup", () => {
       order.push("terminate");
       child.emit("close", 0, null);
     });
+    const issueCapability = vi.fn(async () => {
+      order.push("issue");
+      return capabilityLease(async (pipe) => {
+        order.push("transmit");
+        await endCapabilityPipe(pipe);
+      });
+    });
     const manager = new HermesSidecarManager({
+      binding,
       dataRoot: "/opentrad-data",
+      issueCapability,
+      launcherPath,
       paths,
       platform: "darwin",
       ensureStateDirs,
@@ -60,16 +82,16 @@ describe("HermesSidecarManager startup", () => {
     child.stdout.write(pinnedReadyFrame());
     await expect(started).resolves.toBeUndefined();
 
-    expect(order).toEqual(["ensure", "verify", "spawn"]);
+    expect(order).toEqual(["ensure", "verify", "issue", "spawn", "transmit"]);
     expect(manager.state).toBe("ready");
     expect(spawn).toHaveBeenCalledWith(
       paths.pythonExecutable,
-      ["-u", "-m", "tui_gateway.entry"],
+      ["-I", "-S", "-B", "-u", "-X", "utf8", launcherPath],
       expect.objectContaining({
         cwd: paths.gatewayCwd,
         detached: true,
         shell: false,
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe", "pipe"],
         windowsHide: true,
       }),
     );
@@ -85,7 +107,10 @@ describe("HermesSidecarManager startup", () => {
     const verifyInstallation = vi.fn(async () => {});
     const spawn = vi.fn<HermesSidecarSpawn>(() => child);
     const manager = new HermesSidecarManager({
+      binding,
       dataRoot: "/opentrad-data",
+      issueCapability: defaultIssueCapability,
+      launcherPath,
       paths: mutablePaths,
       platform: "darwin",
       ensureStateDirs,
@@ -155,7 +180,10 @@ describe("HermesSidecarManager startup", () => {
     expect(
       () =>
         new HermesSidecarManager({
+          binding,
           dataRoot: "/opentrad-data",
+          issueCapability: defaultIssueCapability,
+          launcherPath,
           paths,
           platform: "darwin",
           spawn,
@@ -223,7 +251,10 @@ describe("HermesSidecarManager startup", () => {
 
     try {
       new HermesSidecarManager({
+        binding,
         dataRoot: "/opentrad-data",
+        issueCapability: defaultIssueCapability,
+        launcherPath,
         paths,
         platform: "darwin",
         ensureStateDirs: vi.fn(async () => {}),
@@ -654,7 +685,10 @@ function createManager(
       child.emit("close", 0, null);
     });
   return new HermesSidecarManager({
+    binding,
     dataRoot: "/opentrad-data",
+    issueCapability: defaultIssueCapability,
+    launcherPath,
     paths,
     platform: "darwin",
     ensureStateDirs: vi.fn(async () => {}),
@@ -676,13 +710,26 @@ function pinnedReadyFrame(): string {
 function validSpawnSpec() {
   return {
     command: paths.pythonExecutable,
-    args: ["-u", "-m", "tui_gateway.entry"] as const,
+    args: ["-I", "-S", "-B", "-u", "-X", "utf8", launcherPath] as const,
     cwd: paths.gatewayCwd,
-    env: {
-      HERMES_HOME: paths.hermesHome,
-      PYTHONUNBUFFERED: "1",
-    },
+    env: { HERMES_HOME: paths.hermesHome },
   };
+}
+
+async function defaultIssueCapability(): Promise<HermesSidecarCapabilityLease> {
+  return capabilityLease(endCapabilityPipe);
+}
+
+function capabilityLease(
+  transmit: HermesSidecarCapabilityLease["transmit"],
+): HermesSidecarCapabilityLease {
+  return { transmit, revoke: () => {} };
+}
+
+function endCapabilityPipe(pipe: Writable): Promise<void> {
+  return new Promise((resolve) => {
+    pipe.end(Buffer.from("test-capability"), resolve);
+  });
 }
 
 function immediateClient(dispose: () => Promise<void>): HermesSidecarClient & {

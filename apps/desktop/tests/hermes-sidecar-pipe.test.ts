@@ -1,13 +1,25 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveHermesPaths } from "../src/main/services/hermes/paths";
-import { HermesSidecarManager } from "../src/main/services/hermes/sidecar-manager";
+import {
+  type HermesSidecarBinding,
+  type HermesSidecarCapabilityLease,
+  HermesSidecarManager,
+} from "../src/main/services/hermes/sidecar-manager";
 import { createHermesGatewaySpawnSpec } from "../src/main/services/hermes/spawn-spec";
 
 const tempDirs: string[] = [];
+const binding: HermesSidecarBinding = {
+  taskId: "pipe-task",
+  runId: "pipe-run",
+  profileId: "pipe-profile",
+  model: "openai/gpt-5.2",
+  apiMode: "chat_completions",
+};
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -24,17 +36,20 @@ describe("HermesSidecarManager real Node pipes", () => {
       const fixture = join(
         dirname(fileURLToPath(import.meta.url)),
         "fixtures",
-        "hermes-gateway-ready.cjs",
+        "hermes_gateway_ready.py",
       );
-      const paths = { ...resolved, pythonExecutable: fixture };
+      const paths = { ...resolved, pythonExecutable: "/usr/bin/python3" };
+      const launcherPath = fixture;
       const manager = new HermesSidecarManager({
+        binding,
         dataRoot,
+        issueCapability: issueTestCapability,
+        launcherPath,
         paths,
         platform: "darwin",
-        sourceEnv: {},
         verifyInstallation: vi.fn(async () => {}),
-        spawnSpecFactory: (managedPaths) =>
-          createHermesGatewaySpawnSpec(managedPaths, { PATH: process.env.PATH }, "darwin"),
+        spawnSpecFactory: (managedPaths, ownedLauncherPath) =>
+          createHermesGatewaySpawnSpec(managedPaths, ownedLauncherPath),
       });
 
       await expect(manager.start()).resolves.toBeUndefined();
@@ -45,3 +60,16 @@ describe("HermesSidecarManager real Node pipes", () => {
     },
   );
 });
+
+async function issueTestCapability(): Promise<HermesSidecarCapabilityLease> {
+  return {
+    transmit: (pipe) => endPipe(pipe, Buffer.from("pipe-test-capability")),
+    revoke: () => {},
+  };
+}
+
+function endPipe(pipe: Writable, bytes: Buffer): Promise<void> {
+  return new Promise((resolve) => {
+    pipe.end(bytes, resolve);
+  });
+}

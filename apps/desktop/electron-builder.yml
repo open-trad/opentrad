@@ -22,6 +22,15 @@ files:
   - package.json
   - "!**/*.map"
 
+# Python 必须从真实文件路径启动，不能放进 app.asar。launcher 会固定校验并加载
+# 同目录 runtime；这里只复制这两个 OpenTrad-owned boundary 文件。
+extraResources:
+  - from: resources/hermes
+    to: hermes
+    filter:
+      - opentrad_hermes_launcher.py
+      - opentrad_hermes_runtime.py
+
 # native .node 必须从 asar 解出才能 dlopen
 asarUnpack:
   - "**/*.node"

@@ -1,7 +1,8 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { isAbsolute, win32 } from "node:path";
+import type { Readable, Writable } from "node:stream";
+import type { ProviderApiMode } from "../provider-broker";
 import { createHermesCommandRunner } from "./command-runner";
-import { HERMES_GATEWAY_MODULE } from "./constants";
 import {
   HermesGatewayClient,
   type HermesGatewayClientOptions,
@@ -20,11 +21,7 @@ import {
   type HermesSidecarTerminationOptions,
   validateHermesSidecarTerminationOptions,
 } from "./sidecar-process-tree";
-import {
-  createHermesGatewaySpawnSpec,
-  type HermesGatewaySpawnSpec,
-  isHermesGatewaySpawnEnvKeyAllowed,
-} from "./spawn-spec";
+import { createHermesGatewaySpawnSpec, type HermesGatewaySpawnSpec } from "./spawn-spec";
 
 export type HermesSidecarState = "idle" | "starting" | "ready" | "stopping" | "stopped" | "crashed";
 
@@ -52,6 +49,7 @@ export class HermesSidecarError extends Error {
 }
 
 export interface HermesSidecarProcess extends HermesGatewayProcess {
+  readonly stdio: readonly [Writable, Readable, Readable, Writable];
   readonly pid?: number;
   readonly exitCode?: number | null;
   readonly signalCode?: NodeJS.Signals | null;
@@ -62,7 +60,7 @@ export interface HermesSidecarSpawnOptions {
   readonly detached: boolean;
   readonly env: Readonly<Record<string, string>>;
   readonly shell: false;
-  readonly stdio: readonly ["pipe", "pipe", "pipe"];
+  readonly stdio: readonly ["pipe", "pipe", "pipe", "pipe"];
   readonly windowsHide: true;
 }
 
@@ -80,9 +78,31 @@ export interface HermesSidecarClient {
 
 export type HermesSidecarTerminatorFactory = (child: HermesSidecarProcess) => () => Promise<void>;
 
+export interface HermesSidecarBinding {
+  readonly taskId: string;
+  readonly runId: string;
+  readonly profileId: string;
+  readonly model: string;
+  readonly apiMode: ProviderApiMode;
+}
+
+export interface HermesSidecarCapabilityLease {
+  /** Write the short-lived capability to FD3 and close the pipe. */
+  transmit(pipe: Writable): Promise<void>;
+  /** Synchronous revocation lets crash handling revoke before notifying observers. */
+  revoke(): void;
+}
+
+export type HermesSidecarCapabilityIssuer = (
+  binding: HermesSidecarBinding,
+) => Promise<HermesSidecarCapabilityLease>;
+
 export interface HermesSidecarManagerOptions {
+  /** One manager owns exactly one task/run process; never share it across bindings. */
+  readonly binding: HermesSidecarBinding;
   readonly dataRoot: string;
-  readonly sourceEnv?: NodeJS.ProcessEnv;
+  readonly issueCapability: HermesSidecarCapabilityIssuer;
+  readonly launcherPath: string;
   readonly platform?: HermesPlatform;
   readonly paths?: HermesPaths;
   readonly ensureStateDirs?: typeof ensureHermesStateDirs;
@@ -91,11 +111,12 @@ export interface HermesSidecarManagerOptions {
     spawnSpec: HermesGatewaySpawnSpec,
   ) => Promise<unknown>;
   readonly spawn?: HermesSidecarSpawn;
-  readonly spawnSpecFactory?: typeof createHermesGatewaySpawnSpec;
+  readonly spawnSpecFactory?: (paths: HermesPaths, launcherPath: string) => HermesGatewaySpawnSpec;
   readonly clientFactory?: (options: HermesGatewayClientOptions) => HermesSidecarClient;
   readonly terminatorFactory?: HermesSidecarTerminatorFactory;
   readonly terminationOptions?: HermesSidecarTerminationOptions;
   readonly readyTimeoutMs?: number;
+  readonly capabilityTimeoutMs?: number;
 }
 
 export type HermesSidecarCrashListener = (error: HermesSidecarError) => void | Promise<void>;
@@ -116,8 +137,21 @@ interface HermesLifecycleCommand {
   settled: boolean;
 }
 
+interface OwnedCapabilityLease {
+  transmit(pipe: Writable): Promise<void>;
+  revoke(): void;
+}
+
+const BINDING_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const BINDING_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+const DEFAULT_CAPABILITY_TIMEOUT_MS = 750;
+const MAX_CAPABILITY_TIMEOUT_MS = 5_000;
+
 export class HermesSidecarManager {
+  private readonly binding: HermesSidecarBinding;
   private readonly dataRoot: string;
+  private readonly issueCapability: HermesSidecarCapabilityIssuer;
+  private readonly launcherPath: string;
   private readonly paths: HermesPaths;
   private readonly platform: HermesPlatform;
   private readonly ensureStateDirs: typeof ensureHermesStateDirs;
@@ -130,11 +164,14 @@ export class HermesSidecarManager {
   private readonly terminatorFactory: HermesSidecarTerminatorFactory;
   private readonly emergencyTerminatorFactory: HermesSidecarTerminatorFactory;
   private readonly readyTimeoutMs: number | undefined;
+  private readonly capabilityTimeoutMs: number;
   private readonly crashListeners = new Set<HermesSidecarCrashListener>();
   private currentState: HermesSidecarState = "idle";
   private client: HermesSidecarClient | undefined;
   private terminate: (() => Promise<void>) | undefined;
   private unsubscribeCrash: (() => void) | undefined;
+  private activeCapability: OwnedCapabilityLease | undefined;
+  private capabilityPipe: Writable | undefined;
   private readonly lifecycleQueue: HermesLifecycleCommand[] = [];
   private activeCommand: HermesLifecycleCommand | undefined;
   private lastIntent: HermesLifecycleCommand | undefined;
@@ -147,6 +184,9 @@ export class HermesSidecarManager {
     this.dataRoot = options.dataRoot;
     this.platform = options.platform ?? hostHermesPlatform();
     try {
+      this.binding = snapshotBinding(options.binding);
+      this.issueCapability = requireCapabilityIssuer(options.issueCapability);
+      this.launcherPath = requireAbsolutePath(options.launcherPath, this.platform);
       this.paths = Object.freeze({
         ...(options.paths ?? resolveHermesPaths(options.dataRoot, this.platform)),
       });
@@ -158,12 +198,11 @@ export class HermesSidecarManager {
     this.clientFactory =
       options.clientFactory ?? ((clientOptions) => new HermesGatewayClient(clientOptions));
     this.readyTimeoutMs = options.readyTimeoutMs;
+    this.capabilityTimeoutMs = boundedCapabilityTimeout(options.capabilityTimeoutMs);
     const specFactory = options.spawnSpecFactory ?? createHermesGatewaySpawnSpec;
     try {
-      this.spawnSpec = snapshotSpawnSpec(
-        specFactory(this.paths, options.sourceEnv ?? process.env, this.platform),
-      );
-      validateSpawnSpec(this.spawnSpec, this.paths, this.platform);
+      this.spawnSpec = snapshotSpawnSpec(specFactory(this.paths, this.launcherPath));
+      validateSpawnSpec(this.spawnSpec, this.paths, this.launcherPath, this.platform);
     } catch {
       throw new HermesSidecarError("HERMES_SIDECAR_START");
     }
@@ -213,7 +252,9 @@ export class HermesSidecarManager {
       (this.currentState === "idle" || this.currentState === "stopped") &&
       !this.hasPendingLifecycleWork() &&
       !this.client &&
-      !this.terminate
+      !this.terminate &&
+      !this.activeCapability &&
+      !this.capabilityPipe
     ) {
       this.currentState = "stopped";
       return RESOLVED;
@@ -306,13 +347,17 @@ export class HermesSidecarManager {
     const generation = command.token;
     this.generation = generation;
     try {
-      if (this.client || this.terminate) {
+      if (this.client || this.terminate || this.activeCapability || this.capabilityPipe) {
         await this.cleanupCurrent(this.client);
       }
       this.throwIfCanceled(command);
       await this.ensureStateDirs(this.paths, { dataRoot: this.dataRoot });
       this.throwIfCanceled(command);
       await this.verifyInstallation(this.paths.pythonExecutable, this.spawnSpec);
+      this.throwIfCanceled(command);
+
+      const capability = await this.acquireCapability(command);
+      this.activeCapability = capability;
       this.throwIfCanceled(command);
 
       const child = this.spawnProcess(
@@ -339,6 +384,10 @@ export class HermesSidecarManager {
       this.unsubscribeCrash = client.onCrash(() => {
         this.handleCrash(generation);
       });
+      this.throwIfCanceled(command);
+      this.capabilityPipe = requireCapabilityPipe(child.stdio[3]);
+      await this.transmitCapability(command, capability, this.capabilityPipe);
+      this.capabilityPipe = undefined;
       this.throwIfCanceled(command);
       await Promise.race([
         client.ready(),
@@ -379,7 +428,7 @@ export class HermesSidecarManager {
   private async stopOnce(): Promise<void> {
     this.currentState = "stopping";
     try {
-      if (this.client || this.terminate) {
+      if (this.client || this.terminate || this.activeCapability || this.capabilityPipe) {
         await this.cleanupCurrent(this.client);
       }
       this.currentState = "stopped";
@@ -393,6 +442,26 @@ export class HermesSidecarManager {
     if (expectedClient && this.client !== expectedClient) return;
     const client = this.client;
     const terminate = this.terminate;
+    const capability = this.activeCapability;
+    const capabilityPipe = this.capabilityPipe;
+    let cleanupFailed = false;
+
+    if (capability) {
+      try {
+        capability.revoke();
+        if (this.activeCapability === capability) this.activeCapability = undefined;
+      } catch {
+        cleanupFailed = true;
+      }
+    }
+    if (capabilityPipe) {
+      try {
+        capabilityPipe.destroy();
+      } catch {
+        cleanupFailed = true;
+      }
+      if (this.capabilityPipe === capabilityPipe) this.capabilityPipe = undefined;
+    }
     try {
       this.unsubscribeCrash?.();
     } catch {
@@ -404,15 +473,79 @@ export class HermesSidecarManager {
         await client.dispose();
       } else if (terminate) {
         await terminate();
-      } else {
-        return;
       }
     } catch {
-      throw new HermesSidecarError("HERMES_SIDECAR_CLEANUP");
+      cleanupFailed = true;
     }
-    if (!expectedClient || this.client === expectedClient) {
+    if (!cleanupFailed && (!expectedClient || this.client === expectedClient)) {
       this.client = undefined;
       this.terminate = undefined;
+    }
+    if (cleanupFailed) {
+      throw new HermesSidecarError("HERMES_SIDECAR_CLEANUP");
+    }
+  }
+
+  private async acquireCapability(command: HermesLifecycleCommand): Promise<OwnedCapabilityLease> {
+    const acquisition = Promise.resolve().then(() => this.issueCapability(this.binding));
+    const canceled = command.cancellation.then(() => {
+      throw new HermesSidecarError("HERMES_SIDECAR_STOPPED");
+    });
+    let acquisitionWon = false;
+    try {
+      const issued = await Promise.race([acquisition, canceled]);
+      acquisitionWon = true;
+      let capability: OwnedCapabilityLease;
+      try {
+        capability = snapshotCapabilityLease(issued);
+      } catch {
+        revokeLateCapability(issued);
+        throw new HermesSidecarError("HERMES_SIDECAR_START");
+      }
+      if (command.canceled) {
+        capability.revoke();
+        throw new HermesSidecarError("HERMES_SIDECAR_STOPPED");
+      }
+      return capability;
+    } catch (cause) {
+      if (command.canceled) {
+        if (!acquisitionWon) {
+          void acquisition.then(revokeLateCapability, () => {});
+        }
+        if (isSidecarCleanupError(cause)) throw cause;
+        throw new HermesSidecarError("HERMES_SIDECAR_STOPPED");
+      }
+      throw cause;
+    }
+  }
+
+  private async transmitCapability(
+    command: HermesLifecycleCommand,
+    capability: OwnedCapabilityLease,
+    pipe: Writable,
+  ): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new HermesSidecarError("HERMES_SIDECAR_START")),
+        this.capabilityTimeoutMs,
+      );
+    });
+    const transmitted = Promise.resolve().then(() => capability.transmit(pipe));
+    void transmitted.catch(() => {});
+    try {
+      await Promise.race([
+        transmitted,
+        timeout,
+        command.cancellation.then(() => {
+          throw new HermesSidecarError("HERMES_SIDECAR_STOPPED");
+        }),
+      ]);
+      if (!pipe.writableEnded) {
+        throw new HermesSidecarError("HERMES_SIDECAR_START");
+      }
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
@@ -446,6 +579,24 @@ export class HermesSidecarManager {
       this.crashNotifiedGeneration === generation
     ) {
       return;
+    }
+    const capability = this.activeCapability;
+    if (capability) {
+      try {
+        capability.revoke();
+        if (this.activeCapability === capability) this.activeCapability = undefined;
+      } catch {
+        // Crash notification remains sanitized; a later cleanup retries revocation.
+      }
+    }
+    const capabilityPipe = this.capabilityPipe;
+    if (capabilityPipe) {
+      try {
+        capabilityPipe.destroy();
+      } catch {
+        // Process termination remains owned by the gateway client.
+      }
+      if (this.capabilityPipe === capabilityPipe) this.capabilityPipe = undefined;
     }
     this.crashNotifiedGeneration = generation;
     this.currentState = "crashed";
@@ -509,7 +660,7 @@ function spawnOptions(
     detached: platform !== "win32",
     env: { ...spec.env },
     shell: false,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe", "pipe"],
     windowsHide: true,
   };
 }
@@ -523,15 +674,13 @@ const defaultSpawn: HermesSidecarSpawn = (command, args, options) => {
     stdio: [...options.stdio],
     windowsHide: options.windowsHide,
   });
-  if (!child.stdin || !child.stdout || !child.stderr) {
-    throw new HermesSidecarError("HERMES_SIDECAR_START");
-  }
-  return child as HermesSidecarProcess;
+  return child as unknown as HermesSidecarProcess;
 };
 
 function validateSpawnSpec(
   spec: HermesGatewaySpawnSpec,
   paths: HermesPaths,
+  launcherPath: string,
   platform: HermesPlatform,
 ): void {
   const isPlatformAbsolute = platform === "win32" ? win32.isAbsolute : isAbsolute;
@@ -540,19 +689,137 @@ function validateSpawnSpec(
     !isPlatformAbsolute(spec.cwd) ||
     spec.command !== paths.pythonExecutable ||
     spec.cwd !== paths.gatewayCwd ||
-    spec.args.length !== 3 ||
-    spec.args[0] !== "-u" ||
-    spec.args[1] !== "-m" ||
-    spec.args[2] !== HERMES_GATEWAY_MODULE ||
+    spec.args.length !== 7 ||
+    spec.args[0] !== "-I" ||
+    spec.args[1] !== "-S" ||
+    spec.args[2] !== "-B" ||
+    spec.args[3] !== "-u" ||
+    spec.args[4] !== "-X" ||
+    spec.args[5] !== "utf8" ||
+    spec.args[6] !== launcherPath ||
     spec.env.HERMES_HOME !== paths.hermesHome ||
-    spec.env.PYTHONUNBUFFERED !== "1" ||
+    Object.keys(spec.env).length !== 1 ||
     Object.entries(spec.env).some(
-      ([key, value]) =>
-        typeof value !== "string" || !isHermesGatewaySpawnEnvKeyAllowed(key, platform),
+      ([key, value]) => typeof value !== "string" || key !== "HERMES_HOME",
     )
   ) {
     throw new HermesSidecarError("HERMES_SIDECAR_START");
   }
+}
+
+function snapshotBinding(binding: HermesSidecarBinding): HermesSidecarBinding {
+  if (!binding || typeof binding !== "object") {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  const taskId = binding.taskId;
+  const runId = binding.runId;
+  const profileId = binding.profileId;
+  const model = binding.model;
+  const apiMode = binding.apiMode;
+  if (
+    typeof taskId !== "string" ||
+    !BINDING_ID_PATTERN.test(taskId) ||
+    typeof runId !== "string" ||
+    !BINDING_ID_PATTERN.test(runId) ||
+    typeof profileId !== "string" ||
+    !BINDING_ID_PATTERN.test(profileId) ||
+    typeof model !== "string" ||
+    !BINDING_MODEL_PATTERN.test(model) ||
+    (apiMode !== "chat_completions" && apiMode !== "codex_responses")
+  ) {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  return Object.freeze({
+    taskId,
+    runId,
+    profileId,
+    model,
+    apiMode,
+  });
+}
+
+function requireCapabilityIssuer(value: unknown): HermesSidecarCapabilityIssuer {
+  if (typeof value !== "function") {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  const issuer = value;
+  return async (binding) => Reflect.apply(issuer, undefined, [binding]);
+}
+
+function requireAbsolutePath(value: unknown, platform: HermesPlatform): string {
+  const isPlatformAbsolute = platform === "win32" ? win32.isAbsolute : isAbsolute;
+  if (typeof value !== "string" || !isPlatformAbsolute(value)) {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  return value;
+}
+
+function boundedCapabilityTimeout(value: number | undefined): number {
+  const timeout = value ?? DEFAULT_CAPABILITY_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > MAX_CAPABILITY_TIMEOUT_MS) {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  return timeout;
+}
+
+function snapshotCapabilityLease(value: unknown): OwnedCapabilityLease {
+  if (!value || typeof value !== "object") {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  let transmit: unknown;
+  let revoke: unknown;
+  try {
+    transmit = Reflect.get(value, "transmit");
+    revoke = Reflect.get(value, "revoke");
+  } catch {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  if (typeof transmit !== "function" || typeof revoke !== "function") {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  let revoked = false;
+  let revoking = false;
+  return Object.freeze({
+    async transmit(pipe: Writable): Promise<void> {
+      await Reflect.apply(transmit, value, [pipe]);
+    },
+    revoke(): void {
+      if (revoked) return;
+      if (revoking) throw new HermesSidecarError("HERMES_SIDECAR_CLEANUP");
+      revoking = true;
+      try {
+        Reflect.apply(revoke, value, []);
+        revoked = true;
+      } catch {
+        throw new HermesSidecarError("HERMES_SIDECAR_CLEANUP");
+      } finally {
+        revoking = false;
+      }
+    },
+  });
+}
+
+function revokeLateCapability(value: unknown): void {
+  try {
+    if (!value || typeof value !== "object") return;
+    const revoke = Reflect.get(value, "revoke");
+    if (typeof revoke === "function") Reflect.apply(revoke, value, []);
+  } catch {
+    // A canceled start never surfaces late provider details or starts a process.
+  }
+}
+
+function requireCapabilityPipe(value: unknown): Writable {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    typeof Reflect.get(value, "write") !== "function" ||
+    typeof Reflect.get(value, "end") !== "function" ||
+    typeof Reflect.get(value, "destroy") !== "function"
+  ) {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  return value as Writable;
 }
 
 function snapshotSpawnSpec(spec: HermesGatewaySpawnSpec): HermesGatewaySpawnSpec {
