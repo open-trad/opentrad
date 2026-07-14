@@ -7,6 +7,79 @@
 
 import { z } from "zod";
 
+const HermesInteractionRequestIdSchema = z.string().uuid();
+const HermesInteractionDisplayTextSchema = z
+  .string()
+  .max(4_096)
+  .refine((value) => !value.includes("\0") && new TextEncoder().encode(value).length <= 16_384);
+const HermesSudoValueSchema = z
+  .string()
+  .max(4_096)
+  .refine((value) => !value.includes("\0") && new TextEncoder().encode(value).length <= 16_384);
+const HermesSecretValueSchema = z
+  .string()
+  .max(65_536)
+  .refine((value) => !value.includes("\0") && new TextEncoder().encode(value).length <= 262_144);
+
+const HermesInteractionRequestBase = {
+  requestId: HermesInteractionRequestIdSchema,
+  sessionId: z.string().min(1),
+};
+
+export const HermesInteractionRequestSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      ...HermesInteractionRequestBase,
+      kind: z.literal("approval"),
+      toolName: HermesInteractionDisplayTextSchema.optional(),
+      pluginName: HermesInteractionDisplayTextSchema.optional(),
+      command: HermesInteractionDisplayTextSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...HermesInteractionRequestBase,
+      kind: z.literal("sudo"),
+      prompt: HermesInteractionDisplayTextSchema.optional(),
+      command: HermesInteractionDisplayTextSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...HermesInteractionRequestBase,
+      kind: z.literal("secret"),
+      prompt: HermesInteractionDisplayTextSchema.optional(),
+      secretName: HermesInteractionDisplayTextSchema.optional(),
+    })
+    .strict(),
+]);
+export type HermesInteractionRequest = z.infer<typeof HermesInteractionRequestSchema>;
+
+export const HermesInteractionResponseSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      requestId: HermesInteractionRequestIdSchema,
+      kind: z.literal("approval"),
+      choice: z.enum(["once", "session", "always", "deny"]),
+    })
+    .strict(),
+  z
+    .object({
+      requestId: HermesInteractionRequestIdSchema,
+      kind: z.literal("sudo"),
+      value: HermesSudoValueSchema,
+    })
+    .strict(),
+  z
+    .object({
+      requestId: HermesInteractionRequestIdSchema,
+      kind: z.literal("secret"),
+      value: HermesSecretValueSchema,
+    })
+    .strict(),
+]);
+export type HermesInteractionResponse = z.infer<typeof HermesInteractionResponseSchema>;
+
 // stdio MCP server 挂载配置（wire 形态；与 tool-host 的 McpServerConfig 结构一致）
 export const AgentMcpServerConfigSchema = z.object({
   // 命名空间名（工具注册为 "mcp:<name>:<tool>"）
@@ -22,6 +95,8 @@ export type AgentMcpServerConfig = z.infer<typeof AgentMcpServerConfigSchema>;
 
 export const AgentStartSessionRequestSchema = z.object({
   profileId: z.string().min(1),
+  // Renderer selection is only a hint; main resolves and revalidates it before launch.
+  workspaceRoot: z.string().min(1),
   systemPrompt: z.string().optional(),
   // loop 安全阀：M0 默认 50 步、上限 200
   maxSteps: z.number().int().positive().max(200).default(50),
@@ -36,6 +111,7 @@ export type AgentStartSessionRequest = z.infer<typeof AgentStartSessionRequestSc
 
 export const AgentStartSessionResponseSchema = z.object({
   sessionId: z.string(),
+  resumable: z.boolean(),
 });
 export type AgentStartSessionResponse = z.infer<typeof AgentStartSessionResponseSchema>;
 
@@ -59,10 +135,33 @@ export type AgentAbortRequest = z.infer<typeof AgentAbortRequestSchema>;
 
 // -------- agent:profiles:*（Renderer → Main） --------
 
-export const AgentProfileSaveRequestSchema = z.object({
-  // main handler 用 @opentrad/model-providers 的 ProviderProfileSchema 校验
-  profile: z.unknown(),
-});
+const AgentCredentialRefSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((value) => !value.includes("\0") && new TextEncoder().encode(value).length <= 2_048);
+const AgentCredentialSecretSchema = z
+  .string()
+  .min(1)
+  .max(65_536)
+  .refine((value) => !value.includes("\0") && new TextEncoder().encode(value).length <= 262_144);
+
+export const AgentProfileCredentialSchema = z
+  .object({
+    ref: AgentCredentialRefSchema,
+    secret: AgentCredentialSecretSchema,
+  })
+  .strict();
+export type AgentProfileCredential = z.infer<typeof AgentProfileCredentialSchema>;
+
+export const AgentProfileSaveRequestSchema = z
+  .object({
+    // main handler 用 @opentrad/model-providers 的 ProviderProfileSchema 校验
+    profile: z.unknown(),
+    // secret 只进 main 的单一 Profile mutation；绝不回读、落 profile JSON 或进入日志。
+    credential: AgentProfileCredentialSchema.optional(),
+  })
+  .strict();
 export type AgentProfileSaveRequest = z.infer<typeof AgentProfileSaveRequestSchema>;
 
 export const AgentProfileDeleteRequestSchema = z.object({
@@ -70,33 +169,72 @@ export const AgentProfileDeleteRequestSchema = z.object({
 });
 export type AgentProfileDeleteRequest = z.infer<typeof AgentProfileDeleteRequestSchema>;
 
-// -------- agent:credentials:*（Renderer → Main） --------
-// secret 只进 main 进程 safeStorage 加密落库，绝不回读给 renderer、绝不进 log。
-
-export const AgentCredentialSetRequestSchema = z.object({
-  ref: z.string().min(1),
-  secret: z.string().min(1),
-});
-export type AgentCredentialSetRequest = z.infer<typeof AgentCredentialSetRequestSchema>;
-
-export const AgentCredentialDeleteRequestSchema = z.object({
-  ref: z.string().min(1),
-});
-export type AgentCredentialDeleteRequest = z.infer<typeof AgentCredentialDeleteRequestSchema>;
-
 // -------- agent:sessions:list / agent:session:load（会话历史） --------
 
-export interface AgentSessionMeta {
-  sessionId: string;
-  title: string | null;
-  model: string | null;
-  createdAt: number;
-}
+export const AgentSessionStatusSchema = z.enum([
+  "creating",
+  "active",
+  "idle",
+  "resuming",
+  "interrupted",
+  "closed",
+  "error",
+  "read_only",
+]);
+export type AgentSessionStatus = z.infer<typeof AgentSessionStatusSchema>;
+
+const AgentSessionMetaBaseSchema = z.object({
+  sessionId: z.string().min(1),
+  title: z.string().nullable(),
+  model: z.string().nullable(),
+  createdAt: z.number(),
+});
+
+const AgentSessionMetaWithBindingSchema = AgentSessionMetaBaseSchema.extend({
+  profileId: z.string().min(1),
+  workspaceRoot: z.string().min(1),
+  status: AgentSessionStatusSchema,
+  resumable: z.boolean(),
+});
+
+// Rows created before native runtime bindings have none of these fields. Declaring
+// them as optional undefined keeps that wire shape readable while ensuring a
+// partially joined/corrupt binding can never cross the IPC boundary.
+const LegacyAgentSessionMetaSchema = AgentSessionMetaBaseSchema.extend({
+  profileId: z.undefined().optional(),
+  workspaceRoot: z.undefined().optional(),
+  status: z.undefined().optional(),
+  resumable: z.undefined().optional(),
+});
+
+export const AgentSessionMetaSchema = z.union([
+  AgentSessionMetaWithBindingSchema,
+  LegacyAgentSessionMetaSchema,
+]);
+export type AgentSessionMeta = z.infer<typeof AgentSessionMetaSchema>;
 
 export const AgentSessionLoadRequestSchema = z.object({
   sessionId: z.string().min(1),
 });
 export type AgentSessionLoadRequest = z.infer<typeof AgentSessionLoadRequestSchema>;
+
+// -------- agent:session:open（立即本地回放；main 后台恢复 durable binding） --------
+
+export const AgentSessionOpenRequestSchema = AgentSessionLoadRequestSchema;
+export type AgentSessionOpenRequest = z.infer<typeof AgentSessionOpenRequestSchema>;
+
+export const AgentSessionOpenResponseSchema = z.object({
+  session: AgentSessionMetaSchema,
+  events: z.array(z.unknown()),
+  recovery: z.enum(["live", "resuming", "read_only"]),
+});
+export type AgentSessionOpenResponse = z.infer<typeof AgentSessionOpenResponseSchema>;
+
+// Workspace selection always originates from a main-owned native directory picker.
+export const AgentWorkspaceSelectResponseSchema = z
+  .object({ workspaceRoot: z.string().min(1) })
+  .nullable();
+export type AgentWorkspaceSelectResponse = z.infer<typeof AgentWorkspaceSelectResponseSchema>;
 
 // 用户消息事件（持久化在 agent_events，回放时 renderer 据此重建 user item）
 export interface AgentUserEvent {

@@ -29,6 +29,16 @@ export const PtySpawnResponseSchema = z.object({
 
 export type PtySpawnResponse = z.infer<typeof PtySpawnResponseSchema>;
 
+// -------- pty:attach（Renderer → Main） --------
+
+export const PtyAttachRequestSchema = z
+  .object({
+    ptyId: z.string().min(1).max(256),
+  })
+  .strict();
+
+export type PtyAttachRequest = z.infer<typeof PtyAttachRequestSchema>;
+
 // -------- pty:write（Renderer → Main） --------
 
 export const PtyWriteRequestSchema = z.object({

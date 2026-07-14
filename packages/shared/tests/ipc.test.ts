@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   CCStartTaskRequestSchema,
   CCStatusSchema,
+  HermesOAuthStartRequestSchema,
+  HermesOAuthStartResponseSchema,
   IpcChannels,
+  PtyAttachRequestSchema,
   SessionMetaSchema,
   SettingsSetRequestSchema,
 } from "../src";
@@ -13,6 +16,52 @@ describe("IpcChannels constants", () => {
     expect(IpcChannels.CCEvent).toBe("cc:event");
     expect(IpcChannels.RiskGateConfirm).toBe("risk-gate:confirm");
     expect(IpcChannels.SettingsSet).toBe("settings:set");
+  });
+
+  it("exposes the renderer-safe Hermes OAuth start channel", () => {
+    expect(IpcChannels.AuthStartHermesOAuth).toBe("auth:start-hermes-oauth");
+    expect(IpcChannels.PtyAttach).toBe("pty:attach");
+  });
+});
+
+describe("PTY attach schema", () => {
+  it("accepts only a bounded PTY identity", () => {
+    expect(PtyAttachRequestSchema.safeParse({ ptyId: "pty-oauth" }).success).toBe(true);
+    expect(PtyAttachRequestSchema.safeParse({ ptyId: "" }).success).toBe(false);
+    expect(PtyAttachRequestSchema.safeParse({ ptyId: "x".repeat(257) }).success).toBe(false);
+    expect(PtyAttachRequestSchema.safeParse({ ptyId: "pty", token: "never" }).success).toBe(false);
+  });
+});
+
+describe("Hermes OAuth start schema", () => {
+  it("accepts only a profile identity and returns only a PTY identity", () => {
+    expect(HermesOAuthStartRequestSchema.safeParse({ profileId: "chatgpt-oauth" }).success).toBe(
+      true,
+    );
+    expect(
+      HermesOAuthStartRequestSchema.safeParse({
+        profileId: "chatgpt-oauth",
+        provider: "attacker-selected",
+      }).success,
+    ).toBe(false);
+    expect(
+      HermesOAuthStartRequestSchema.safeParse({
+        profileId: "chatgpt-oauth",
+        command: "/bin/sh",
+      }).success,
+    ).toBe(false);
+    expect(HermesOAuthStartRequestSchema.safeParse({ profileId: "" }).success).toBe(false);
+    expect(HermesOAuthStartRequestSchema.safeParse({ profileId: "profile.alpha:1" }).success).toBe(
+      true,
+    );
+    for (const profileId of ["../escape", "profile/escape", "profile space", ".hidden"]) {
+      expect(HermesOAuthStartRequestSchema.safeParse({ profileId }).success).toBe(false);
+    }
+
+    expect(HermesOAuthStartResponseSchema.safeParse({ ptyId: "pty-1" }).success).toBe(true);
+    expect(
+      HermesOAuthStartResponseSchema.safeParse({ ptyId: "pty-1", token: "never" }).success,
+    ).toBe(false);
   });
 });
 

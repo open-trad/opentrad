@@ -63,4 +63,45 @@ describe("PtyManager", () => {
     // 这里只 assert cleanup 函数本身幂等可调用，不抛
     expect(() => manager.cleanup()).not.toThrow();
   });
+
+  it.skipIf(process.platform === "win32")(
+    "inheritEnv=false 只把显式环境传给受管 OAuth PTY",
+    async () => {
+      const manager = new PtyManager();
+      const leakedName = "OPENTRAD_PTY_SHOULD_NOT_LEAK";
+      const previous = process.env[leakedName];
+      process.env[leakedName] = "parent-secret";
+
+      try {
+        const buffer: string[] = [];
+        let resolveDone: () => void = () => {};
+        const done = new Promise<void>((resolve) => {
+          resolveDone = resolve;
+        });
+
+        manager.on("data", ({ data }) => buffer.push(data));
+        manager.on("exit", resolveDone);
+        manager.spawn({
+          command: "/usr/bin/env",
+          env: { OPENTRAD_PTY_ALLOWED: "yes" },
+          inheritEnv: false,
+        });
+
+        await Promise.race([
+          done,
+          new Promise<void>((_, reject) =>
+            setTimeout(() => reject(new Error("env timed out")), 5000),
+          ),
+        ]);
+
+        const output = buffer.join("");
+        expect(output).toContain("OPENTRAD_PTY_ALLOWED=yes");
+        expect(output).not.toContain(`${leakedName}=parent-secret`);
+      } finally {
+        if (previous === undefined) delete process.env[leakedName];
+        else process.env[leakedName] = previous;
+        manager.cleanup();
+      }
+    },
+  );
 });

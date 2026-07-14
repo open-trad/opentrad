@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createHermesCommandRunner,
   HERMES_COMMAND_MAX_BUFFER_BYTES,
+  HERMES_COMMAND_MAX_TIMEOUT_MS,
   HERMES_COMMAND_TIMEOUT_MS,
   type HermesExecFileLike,
 } from "../src/main/services/hermes/command-runner";
@@ -41,7 +42,7 @@ describe("createHermesCommandRunner", () => {
     ["sub-integer timeout", { timeoutMs: Number.MIN_VALUE }],
     ["NaN timeout", { timeoutMs: Number.NaN }],
     ["infinite timeout", { timeoutMs: Number.POSITIVE_INFINITY }],
-    ["timeout over maximum", { timeoutMs: HERMES_COMMAND_TIMEOUT_MS + 1 }],
+    ["timeout over maximum", { timeoutMs: HERMES_COMMAND_MAX_TIMEOUT_MS + 1 }],
     ["zero buffer", { maxBufferBytes: 0 }],
     ["negative buffer", { maxBufferBytes: -1 }],
     ["fractional buffer", { maxBufferBytes: 1.5 }],
@@ -92,6 +93,22 @@ describe("createHermesCommandRunner", () => {
       expect.any(Function),
     );
     expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  it("allows a bounded installer timeout without changing the short default", async () => {
+    const execFile = vi.fn<HermesExecFileLike>((_command, _args, options, callback) => {
+      expect(options).toMatchObject({ shell: false, windowsHide: true });
+      queueMicrotask(() => callback(null, "", ""));
+      return {};
+    });
+    const runner = createHermesCommandRunner({
+      execFile,
+      cwd,
+      env: filteredEnv,
+      timeoutMs: HERMES_COMMAND_MAX_TIMEOUT_MS,
+    });
+
+    await expect(runner(managedPython, ["-V"])).resolves.toEqual({ stdout: "" });
   });
 
   it("rejects relative commands before invoking execFile", async () => {

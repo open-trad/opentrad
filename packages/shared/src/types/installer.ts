@@ -8,6 +8,45 @@
 
 import { z } from "zod";
 
+export const HermesRuntimeInstallArtifactSchema = z.enum([
+  "cpython",
+  "uv",
+  "hermes-wheel",
+  "requirements-lock",
+  "hermes-source",
+]);
+
+const HermesRuntimeInstallArtifactProgressSchema = z
+  .object({
+    phase: z.enum(["downloading", "verifying-download"]),
+    artifact: HermesRuntimeInstallArtifactSchema,
+  })
+  .strict();
+
+const HermesRuntimeInstallPhaseProgressSchema = z
+  .object({
+    phase: z.enum([
+      "checking",
+      "preparing",
+      "installing",
+      "verifying-runtime",
+      "switching",
+      "ready",
+    ]),
+  })
+  .strict();
+
+/**
+ * Deliberately contains only display-safe identities. Download URLs, paths,
+ * diagnostics, and credentials are never part of the renderer progress wire format.
+ */
+export const HermesRuntimeInstallProgressSchema = z.union([
+  HermesRuntimeInstallArtifactProgressSchema,
+  HermesRuntimeInstallPhaseProgressSchema,
+]);
+
+export type HermesRuntimeInstallProgress = z.infer<typeof HermesRuntimeInstallProgressSchema>;
+
 // installer:supports-auto-install（Renderer → Main）
 // 返回当前平台是否支持自动安装。Windows 永远 false（A3）；macOS / Linux 看
 // 是否能找到 curl + bash（fresh 系统都有，理论返回 true）。

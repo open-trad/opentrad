@@ -5,7 +5,7 @@
 // - risk-gate:confirm:main → renderer push(payload 含 requestId + 弹窗内容);本文件不
 //   handle invoke,只是 channel 名字
 // - risk-gate:response:renderer → main invoke,renderer 把用户决策(allow_once /
-//   allow_always / deny / request_edit)+ requestId 回传;main 根据 requestId 解析
+//   allow_session / allow_always / deny / request_edit)+ requestId 回传;main 根据 requestId 解析
 //   pending Promise(IpcRiskGatePrompter 内部维护)
 //
 // graceful degrade(D-M1-5):

@@ -3,247 +3,274 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createHermesProviderCapabilityIssuer,
   HermesProviderCapabilityError,
+  type HermesProviderProfileSecrets,
 } from "../src/main/services/hermes/provider-capability-issuer";
 import type { HermesSidecarBinding } from "../src/main/services/hermes/sidecar-manager";
-import type {
-  IssuedProviderCapability,
-  ProviderBroker,
-  ProviderBrokerEndpoint,
-  ProviderCredentialLease,
-} from "../src/main/services/provider-broker";
 
-const nowMs = 1_752_240_000_000;
-const binding: HermesSidecarBinding = {
+const deepSeekBinding: HermesSidecarBinding = {
   taskId: "task-123",
   runId: "run-456",
-  profileId: "profile-789",
-  model: "openai/gpt-5.2",
+  profileId: "profile-deepseek",
+  providerSlug: "deepseek",
+  authMode: "api_key",
+  model: "deepseek-chat",
   apiMode: "chat_completions",
+  executionBackend: "local",
 };
-const endpoint: ProviderBrokerEndpoint = { host: "127.0.0.1", port: 43_117 };
-const issued: IssuedProviderCapability = {
-  capabilityId: "11111111-2222-4333-8444-555555555555",
-  token: "provider-capability-token-0123456789abcdef",
-  expiresAt: Math.floor(nowMs / 1_000) + 60,
+
+const chatGptBinding: HermesSidecarBinding = {
+  taskId: "task-789",
+  runId: "run-012",
+  profileId: "profile-chatgpt",
+  providerSlug: "openai-codex",
+  authMode: "oauth",
+  model: "gpt-5.2-codex",
+  apiMode: "codex_responses",
+  executionBackend: "local",
 };
 
 describe("createHermesProviderCapabilityIssuer", () => {
-  it("maps a frozen task binding into one exact FD3 wire capability", async () => {
-    const order: string[] = [];
-    const credentialLease: ProviderCredentialLease = {
-      secrets: ["long-lived-provider-credential-canary"],
-    };
-    const broker = fakeBroker({
-      start: vi.fn(async () => {
-        order.push("start");
-        return endpoint;
-      }),
-      issue: vi.fn((input, receivedCredentials) => {
-        order.push("issue");
-        expect(input).toEqual({ ...binding, ttlMs: 60_000 });
-        expect(receivedCredentials).toBe(credentialLease);
-        return issued;
-      }),
+  it("writes one exact native DeepSeek profile bootstrap payload to FD3", async () => {
+    const profileSecrets = {
+      apiKey: "sk-deepseek-test-key",
+      baseUrl: "https://api.deepseek.com/v1",
+    } satisfies HermesProviderProfileSecrets;
+    const acquireProfileSecrets = vi.fn(async (binding: HermesSidecarBinding) => {
+      expect(binding).toEqual(deepSeekBinding);
+      expect(Object.isFrozen(binding)).toBe(true);
+      return profileSecrets;
     });
-    const acquireCredentialLease = vi.fn(async (receivedBinding: HermesSidecarBinding) => {
-      order.push("credential");
-      expect(receivedBinding).toEqual(binding);
-      expect(Object.isFrozen(receivedBinding)).toBe(true);
-      return credentialLease;
-    });
-    const issuer = createHermesProviderCapabilityIssuer({
-      acquireCredentialLease,
-      broker,
-      now: () => nowMs,
-      ttlMs: 60_000,
-    });
+    const issuer = createHermesProviderCapabilityIssuer({ acquireProfileSecrets });
 
-    const capability = await issuer(binding);
+    const lease = await issuer(deepSeekBinding);
     const output = new CapturingWritable();
-    await capability.transmit(output);
+    await lease.transmit(output);
 
-    expect(order).toEqual(["start", "credential", "issue"]);
-    expect(Object.keys(capability).sort()).toEqual(["revoke", "transmit"]);
-    expect(JSON.stringify(capability)).toBe("{}");
+    expect(acquireProfileSecrets).toHaveBeenCalledOnce();
+    expect(Object.keys(lease).sort()).toEqual(["revoke", "transmit"]);
+    expect(JSON.stringify(lease)).toBe("{}");
     expect(JSON.parse(output.copy.toString("utf8"))).toEqual({
       v: 1,
-      expiresAt: issued.expiresAt,
-      token: issued.token,
-      model: binding.model,
-      apiMode: binding.apiMode,
-      brokerPort: endpoint.port,
+      profileId: "profile-deepseek",
+      providerSlug: "deepseek",
+      authMode: "api_key",
+      apiMode: "chat_completions",
+      executionBackend: "local",
+      model: "deepseek-chat",
+      apiKey: "sk-deepseek-test-key",
+      baseUrl: "https://api.deepseek.com/v1",
     });
-    expect(output.copy.toString("utf8")).not.toContain(credentialLease.secrets[0] ?? "");
     expect(output.original?.every((byte) => byte === 0)).toBe(true);
-    expect(broker.revoke).not.toHaveBeenCalled();
-
-    capability.revoke();
-    capability.revoke();
-    expect(broker.revoke).toHaveBeenCalledOnce();
-    expect(broker.revoke).toHaveBeenCalledWith(issued.capabilityId);
   });
 
-  it("validates expiry against the time of issuance after asynchronous setup", async () => {
-    let currentTime = nowMs;
-    const broker = fakeBroker({
-      start: vi.fn(async () => {
-        currentTime += 1_500;
-        return endpoint;
-      }),
-      issue: vi.fn(() => ({
-        ...issued,
-        expiresAt: Math.floor(currentTime / 1_000) + 300,
-      })),
-    });
+  it("writes an OAuth bootstrap without API key or base URL", async () => {
     const issuer = createHermesProviderCapabilityIssuer({
-      acquireCredentialLease: async () => ({ secrets: [] }),
-      broker,
-      now: () => currentTime,
-      ttlMs: 300_000,
+      acquireProfileSecrets: async () => ({ apiKey: null, baseUrl: null }),
     });
 
-    const capability = await issuer(binding);
+    const lease = await issuer(chatGptBinding);
+    const output = new CapturingWritable();
+    await lease.transmit(output);
 
-    expect(broker.issue).toHaveBeenCalledOnce();
-    capability.revoke();
+    expect(JSON.parse(output.copy.toString("utf8"))).toEqual({
+      v: 1,
+      profileId: "profile-chatgpt",
+      providerSlug: "openai-codex",
+      authMode: "oauth",
+      apiMode: "codex_responses",
+      executionBackend: "local",
+      model: "gpt-5.2-codex",
+      apiKey: null,
+      baseUrl: null,
+    });
   });
 
-  it("revokes and zeroes before transmit, then rejects without reflecting token", async () => {
-    const broker = fakeBroker();
-    const issuer = createIssuer(broker);
-    const capability = await issuer(binding);
+  it("passes a validated custom endpoint through the native bootstrap", async () => {
+    const customBinding = {
+      ...deepSeekBinding,
+      profileId: "profile-custom",
+      providerSlug: "custom:profile-custom",
+      executionBackend: "docker",
+    } satisfies HermesSidecarBinding;
+    const issuer = createHermesProviderCapabilityIssuer({
+      acquireProfileSecrets: async () => ({
+        apiKey: "custom-provider-key",
+        baseUrl: "https://llm.example.test/v1",
+      }),
+    });
 
-    capability.revoke();
-    const error = await capability
-      .transmit(new CapturingWritable())
-      .catch((cause: unknown) => cause);
+    const lease = await issuer(customBinding);
+    const output = new CapturingWritable();
+    await lease.transmit(output);
+
+    expect(JSON.parse(output.copy.toString("utf8"))).toMatchObject({
+      profileId: "profile-custom",
+      providerSlug: "custom:profile-custom",
+      executionBackend: "docker",
+      apiKey: "custom-provider-key",
+      baseUrl: "https://llm.example.test/v1",
+    });
+  });
+
+  it.each([
+    {
+      name: "OAuth API key",
+      binding: chatGptBinding,
+      secrets: { apiKey: "must-not-cross-fd3", baseUrl: null },
+    },
+    {
+      name: "OAuth base URL",
+      binding: chatGptBinding,
+      secrets: { apiKey: null, baseUrl: "https://oauth.example.test/v1" },
+    },
+    {
+      name: "missing API key",
+      binding: deepSeekBinding,
+      secrets: { apiKey: null, baseUrl: "https://api.deepseek.com/v1" },
+    },
+    {
+      name: "empty API key",
+      binding: deepSeekBinding,
+      secrets: { apiKey: "", baseUrl: "https://api.deepseek.com/v1" },
+    },
+    {
+      name: "non-ASCII API key",
+      binding: deepSeekBinding,
+      secrets: { apiKey: "secret-密钥", baseUrl: "https://api.deepseek.com/v1" },
+    },
+    {
+      name: "control character in API key",
+      binding: deepSeekBinding,
+      secrets: { apiKey: "secret\nkey", baseUrl: "https://api.deepseek.com/v1" },
+    },
+    {
+      name: "oversized API key",
+      binding: deepSeekBinding,
+      secrets: { apiKey: "a".repeat(2_049), baseUrl: "https://api.deepseek.com/v1" },
+    },
+    {
+      name: "malformed URL",
+      binding: deepSeekBinding,
+      secrets: { apiKey: "valid-key", baseUrl: "not a URL" },
+    },
+    {
+      name: "non-HTTP URL",
+      binding: deepSeekBinding,
+      secrets: { apiKey: "valid-key", baseUrl: "file:///tmp/provider" },
+    },
+    {
+      name: "URL with credentials",
+      binding: deepSeekBinding,
+      secrets: { apiKey: "valid-key", baseUrl: "https://user:pass@example.test/v1" },
+    },
+    {
+      name: "missing custom URL",
+      binding: { ...deepSeekBinding, providerSlug: "custom:profile-deepseek" },
+      secrets: { apiKey: "valid-key", baseUrl: null },
+    },
+  ])("rejects $name with one sanitized error", async ({ binding, secrets }) => {
+    const issuer = createHermesProviderCapabilityIssuer({
+      acquireProfileSecrets: async () => secrets,
+    });
+
+    const error = await issuer(binding).catch((cause: unknown) => cause);
 
     expect(error).toBeInstanceOf(HermesProviderCapabilityError);
     expect(String(error)).toBe(
       "HermesProviderCapabilityError: Hermes provider capability is unavailable",
     );
-    expect(String(error)).not.toContain(issued.token);
-    expect(broker.revoke).toHaveBeenCalledOnce();
+    if (secrets.apiKey) expect(String(error)).not.toContain(secrets.apiKey);
+    if (secrets.baseUrl) expect(String(error)).not.toContain(secrets.baseUrl);
   });
 
-  it("destroys an in-flight FD3 write when synchronously revoked", async () => {
-    const broker = fakeBroker();
-    const capability = await createIssuer(broker)(binding);
+  it("sanitizes secret source failures", async () => {
+    const issuer = createHermesProviderCapabilityIssuer({
+      acquireProfileSecrets: async () => {
+        throw new Error("safe-storage-secret-canary");
+      },
+    });
+
+    const error = await issuer(deepSeekBinding).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(HermesProviderCapabilityError);
+    expect(String(error)).not.toContain("canary");
+  });
+
+  it("allows one transmission only and zeroes the payload after success", async () => {
+    const lease = await createApiKeyIssuer()(deepSeekBinding);
+    const first = new CapturingWritable();
+
+    await lease.transmit(first);
+    await expect(lease.transmit(new CapturingWritable())).rejects.toBeInstanceOf(
+      HermesProviderCapabilityError,
+    );
+
+    expect(first.original?.every((byte) => byte === 0)).toBe(true);
+    expect(JSON.stringify(lease)).not.toContain("api-key-canary");
+  });
+
+  it("revokes and zeroes before transmission", async () => {
+    const lease = await createApiKeyIssuer()(deepSeekBinding);
+
+    lease.revoke();
+    lease.revoke();
+    const error = await lease.transmit(new CapturingWritable()).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(HermesProviderCapabilityError);
+    expect(String(error)).not.toContain("api-key-canary");
+  });
+
+  it("zeroes the payload when FD3 transmission fails", async () => {
+    const lease = await createApiKeyIssuer()(deepSeekBinding);
+    const output = new FailingWritable();
+
+    await expect(lease.transmit(output)).rejects.toBeInstanceOf(HermesProviderCapabilityError);
+
+    expect(output.original?.every((byte) => byte === 0)).toBe(true);
+    await expect(lease.transmit(new CapturingWritable())).rejects.toBeInstanceOf(
+      HermesProviderCapabilityError,
+    );
+  });
+
+  it("destroys and rejects an in-flight FD3 write when synchronously revoked", async () => {
+    const lease = await createApiKeyIssuer()(deepSeekBinding);
     const output = new StalledWritable();
-    const transmitting = capability.transmit(output);
+    const transmitting = lease.transmit(output);
     await vi.waitFor(() => expect(output.original).toBeDefined());
 
-    capability.revoke();
+    lease.revoke();
     const error = await transmitting.catch((cause: unknown) => cause);
 
     expect(error).toBeInstanceOf(HermesProviderCapabilityError);
     expect(output.destroyed).toBe(true);
     expect(output.original?.every((byte) => byte === 0)).toBe(true);
-    expect(broker.revoke).toHaveBeenCalledOnce();
   });
 
-  it("allows only one transmit and never retains the payload after failure", async () => {
-    const broker = fakeBroker();
-    const capability = await createIssuer(broker)(binding);
-    const first = new FailingWritable();
-
-    await expect(capability.transmit(first)).rejects.toBeInstanceOf(HermesProviderCapabilityError);
-    expect(first.original?.every((byte) => byte === 0)).toBe(true);
-    await expect(capability.transmit(new CapturingWritable())).rejects.toBeInstanceOf(
-      HermesProviderCapabilityError,
-    );
-    expect(JSON.stringify(capability)).not.toContain(issued.token);
-    capability.revoke();
-  });
-
-  it("absorbs a stream error emitted after the successful end callback", async () => {
-    const broker = fakeBroker();
-    const capability = await createIssuer(broker)(binding);
-    const output = new LateFailingWritable();
-
-    await capability.transmit(output);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-
-    expect(output.destroyed).toBe(true);
-    capability.revoke();
-  });
-
-  it.each([
-    {
-      name: "wrong broker host",
-      start: async () => ({ host: "0.0.0.0", port: 43_117 }),
-    },
-    {
-      name: "invalid broker port",
-      start: async () => ({ host: "127.0.0.1", port: 0 }),
-    },
-  ])("rejects $name before issuing", async ({ start }) => {
-    const broker = fakeBroker({ start: vi.fn(start) as never });
-    const error = await createIssuer(broker)(binding).catch((cause: unknown) => cause);
-
-    expect(error).toBeInstanceOf(HermesProviderCapabilityError);
-    expect(String(error)).not.toContain("0.0.0.0");
-    expect(broker.issue).not.toHaveBeenCalled();
-  });
-
-  it("revokes a malformed issued capability without reflecting its values", async () => {
-    const broker = fakeBroker({
-      issue: vi.fn(() => ({
-        ...issued,
-        token: "malformed token canary",
-      })),
-    });
-    const error = await createIssuer(broker)(binding).catch((cause: unknown) => cause);
-
-    expect(error).toBeInstanceOf(HermesProviderCapabilityError);
-    expect(String(error)).not.toContain("canary");
-    expect(broker.revoke).toHaveBeenCalledOnce();
-    expect(broker.revoke).toHaveBeenCalledWith(issued.capabilityId);
-  });
-
-  it("sanitizes broker and credential-source failures", async () => {
-    const brokerFailure = fakeBroker({
-      start: vi.fn(async () => {
-        throw new Error("broker-start-canary");
+  it("rejects a payload larger than the fixed FD3 budget and does not open a pipe", async () => {
+    const binding = {
+      ...deepSeekBinding,
+      model: `model-${"m".repeat(121)}`,
+    } satisfies HermesSidecarBinding;
+    const issuer = createHermesProviderCapabilityIssuer({
+      acquireProfileSecrets: async () => ({
+        apiKey: "k".repeat(2_048),
+        baseUrl: `https://example.test/${"p".repeat(1_900)}`,
       }),
     });
-    const credentialFailure = fakeBroker();
-    const first = await createIssuer(brokerFailure)(binding).catch((cause: unknown) => cause);
-    const second = await createHermesProviderCapabilityIssuer({
-      acquireCredentialLease: async () => {
-        throw new Error("keychain-credential-canary");
-      },
-      broker: credentialFailure,
-      now: () => nowMs,
-      ttlMs: 60_000,
-    })(binding).catch((cause: unknown) => cause);
 
-    for (const error of [first, second]) {
-      expect(error).toBeInstanceOf(HermesProviderCapabilityError);
-      expect(String(error)).not.toContain("canary");
-    }
-    expect(credentialFailure.issue).not.toHaveBeenCalled();
+    const error = await issuer(binding).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(HermesProviderCapabilityError);
   });
 });
 
-function createIssuer(broker: BrokerContract) {
+function createApiKeyIssuer() {
   return createHermesProviderCapabilityIssuer({
-    acquireCredentialLease: async () => ({ secrets: [] }),
-    broker,
-    now: () => nowMs,
-    ttlMs: 60_000,
+    acquireProfileSecrets: async () => ({
+      apiKey: "api-key-canary",
+      baseUrl: "https://api.deepseek.com/v1",
+    }),
   });
-}
-
-type BrokerContract = Pick<ProviderBroker, "start" | "issue" | "revoke">;
-
-function fakeBroker(overrides: Partial<BrokerContract> = {}): BrokerContract {
-  return {
-    start: vi.fn(async () => endpoint),
-    issue: vi.fn(() => issued),
-    revoke: vi.fn(),
-    ...overrides,
-  };
 }
 
 class CapturingWritable extends Writable {
@@ -271,16 +298,5 @@ class FailingWritable extends Writable {
   override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error) => void) {
     this.original = chunk;
     callback(new Error("fd3-write-canary"));
-  }
-}
-
-class LateFailingWritable extends Writable {
-  override _write(_chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error) => void) {
-    callback();
-  }
-
-  override _final(callback: (error?: Error) => void) {
-    callback();
-    queueMicrotask(() => this.destroy(new Error("fd3-late-error-canary")));
   }
 }

@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough, type Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveHermesPaths } from "../src/main/services/hermes/paths";
+import { resolveHermesPaths, resolveHermesProfilePaths } from "../src/main/services/hermes/paths";
 import {
   type HermesSidecarBinding,
   type HermesSidecarCapabilityLease,
@@ -11,6 +11,7 @@ import {
   type HermesSidecarSpawn,
   type HermesSidecarTerminatorFactory,
 } from "../src/main/services/hermes/sidecar-manager";
+import { resolveHermesCopilotGhHost } from "../src/main/services/hermes/spawn-spec";
 
 class FakeSidecarProcess extends EventEmitter implements HermesSidecarProcess {
   readonly stdin = new PassThrough();
@@ -25,12 +26,16 @@ class FakeSidecarProcess extends EventEmitter implements HermesSidecarProcess {
 
 const paths = resolveHermesPaths("/opentrad-data", "darwin");
 const launcherPath = "/opentrad-app/resources/hermes/opentrad_hermes_launcher.py";
+const workspaceRoot = "/workspace/project";
 const binding: HermesSidecarBinding = {
   taskId: "task-123",
   runId: "run-456",
   profileId: "profile-789",
+  providerSlug: "deepseek",
+  authMode: "api_key",
   model: "openai/gpt-5.2",
   apiMode: "chat_completions",
+  executionBackend: "local",
 };
 
 afterEach(() => {
@@ -39,6 +44,49 @@ afterEach(() => {
 });
 
 describe("HermesSidecarManager startup", () => {
+  it("derives its default home from the binding profile while keeping the runtime shared", async () => {
+    const child = new FakeSidecarProcess();
+    const ensureStateDirs = vi.fn(async () => {});
+    const initializeProfileHome = vi.fn(async () => {});
+    const verifyInstallation = vi.fn(async () => {});
+    const spawn = vi.fn<HermesSidecarSpawn>(() => child);
+    const expected = resolveHermesProfilePaths("/opentrad-data", binding.profileId, "darwin");
+    const manager = new HermesSidecarManager({
+      binding,
+      dataRoot: "/opentrad-data",
+      workspaceRoot,
+      issueCapability: defaultIssueCapability,
+      launcherPath,
+      platform: "darwin",
+      ensureStateDirs,
+      initializeProfileHome,
+      verifyInstallation,
+      spawn,
+      terminatorFactory: () => async () => {
+        child.emit("close", 0, null);
+      },
+    });
+
+    const started = manager.start();
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+    child.stdout.write(pinnedReadyFrame());
+    await expect(started).resolves.toBeUndefined();
+
+    expect(ensureStateDirs).toHaveBeenCalledWith(expected, { dataRoot: "/opentrad-data" });
+    expect(initializeProfileHome).toHaveBeenCalledWith(binding, expected);
+    expect(verifyInstallation).toHaveBeenCalledWith(expected.pythonExecutable, expect.any(Object));
+    expect(spawn).toHaveBeenCalledWith(
+      expected.pythonExecutable,
+      ["-I", "-S", "-B", "-u", "-X", "utf8", launcherPath],
+      expect.objectContaining({
+        cwd: expected.gatewayCwd,
+        env: expect.objectContaining({ HERMES_HOME: expected.hermesHome }),
+      }),
+    );
+    expect(expected.runtimeRoot).toBe(paths.runtimeRoot);
+    await manager.stop();
+  });
+
   it("starts in the fail-closed order and accepts the pinned ready envelope", async () => {
     const child = new FakeSidecarProcess();
     const order: string[] = [];
@@ -47,6 +95,9 @@ describe("HermesSidecarManager startup", () => {
     });
     const verifyInstallation = vi.fn(async () => {
       order.push("verify");
+    });
+    const initializeProfileHome = vi.fn(async () => {
+      order.push("initialize");
     });
     const spawn = vi.fn<HermesSidecarSpawn>(() => {
       order.push("spawn");
@@ -66,11 +117,13 @@ describe("HermesSidecarManager startup", () => {
     const manager = new HermesSidecarManager({
       binding,
       dataRoot: "/opentrad-data",
+      workspaceRoot,
       issueCapability,
       launcherPath,
       paths,
       platform: "darwin",
       ensureStateDirs,
+      initializeProfileHome,
       verifyInstallation,
       spawn,
       terminatorFactory: () => terminate,
@@ -82,7 +135,7 @@ describe("HermesSidecarManager startup", () => {
     child.stdout.write(pinnedReadyFrame());
     await expect(started).resolves.toBeUndefined();
 
-    expect(order).toEqual(["ensure", "verify", "issue", "spawn", "transmit"]);
+    expect(order).toEqual(["ensure", "initialize", "verify", "issue", "spawn", "transmit"]);
     expect(manager.state).toBe("ready");
     expect(spawn).toHaveBeenCalledWith(
       paths.pythonExecutable,
@@ -109,11 +162,13 @@ describe("HermesSidecarManager startup", () => {
     const manager = new HermesSidecarManager({
       binding,
       dataRoot: "/opentrad-data",
+      workspaceRoot,
       issueCapability: defaultIssueCapability,
       launcherPath,
       paths: mutablePaths,
       platform: "darwin",
       ensureStateDirs,
+      initializeProfileHome: defaultInitializeProfileHome,
       verifyInstallation,
       spawn,
       terminatorFactory: () => async () => {
@@ -182,10 +237,12 @@ describe("HermesSidecarManager startup", () => {
         new HermesSidecarManager({
           binding,
           dataRoot: "/opentrad-data",
+          workspaceRoot,
           issueCapability: defaultIssueCapability,
           launcherPath,
           paths,
           platform: "darwin",
+          initializeProfileHome: defaultInitializeProfileHome,
           spawn,
           terminationOptions: { gracefulShutdownMs: 1_000 },
         }),
@@ -253,11 +310,13 @@ describe("HermesSidecarManager startup", () => {
       new HermesSidecarManager({
         binding,
         dataRoot: "/opentrad-data",
+        workspaceRoot,
         issueCapability: defaultIssueCapability,
         launcherPath,
         paths,
         platform: "darwin",
         ensureStateDirs: vi.fn(async () => {}),
+        initializeProfileHome: defaultInitializeProfileHome,
         verifyInstallation: vi.fn(async () => {}),
         spawn,
         spawnSpecFactory: () => mutate(validSpawnSpec()),
@@ -270,6 +329,62 @@ describe("HermesSidecarManager startup", () => {
     expect(String(error)).not.toContain("canary");
     expect(JSON.stringify(error)).not.toContain("canary");
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("accepts only the explicit tool environment allowlist", async () => {
+    const child = new FakeSidecarProcess();
+    const spawn = vi.fn<HermesSidecarSpawn>(() => child);
+    const allowedEnv = {
+      HOME: "/Users/example",
+      PATH: "/opt/homebrew/bin:/usr/bin:/bin",
+      LANG: "en_US.UTF-8",
+      TERM: "xterm-256color",
+      SSH_AUTH_SOCK: "/private/tmp/ssh-agent.sock",
+      HERMES_HOME: paths.hermesHome,
+      GH_CONFIG_DIR: `${paths.hermesHome}/gh-config`,
+      XDG_CONFIG_HOME: `${paths.hermesHome}/xdg-config`,
+      COPILOT_GH_HOST: resolveHermesCopilotGhHost(paths.hermesHome),
+      CODEX_HOME: `${paths.hermesHome}/codex-home`,
+      HERMES_BUNDLED_SKILLS: `${paths.runtimeRoot}/share/hermes/skills`,
+      OPENTRAD_WORKSPACE_ROOT: workspaceRoot,
+    };
+    const manager = createManager({
+      child,
+      spawn,
+      spawnSpecFactory: () => ({ ...validSpawnSpec(), env: allowedEnv }),
+    });
+
+    const started = manager.start();
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+    child.stdout.write(pinnedReadyFrame());
+    await expect(started).resolves.toBeUndefined();
+
+    expect(spawn.mock.calls[0]?.[2].env).toEqual(allowedEnv);
+    await manager.stop();
+  });
+
+  it("fails closed before installation verification, FD3 issuance, or spawn when initialization fails", async () => {
+    const verifyInstallation = vi.fn(async () => {});
+    const issueCapability = vi.fn(defaultIssueCapability);
+    const spawn = vi.fn<HermesSidecarSpawn>();
+    const manager = createManager({
+      initializeProfileHome: vi.fn(async () => {
+        throw new Error("https://url-secret-canary.example/v1");
+      }),
+      verifyInstallation,
+      issueCapability,
+      spawn,
+    });
+
+    const error = await manager.start().catch((cause: unknown) => cause);
+
+    expect(error).toMatchObject({ code: "HERMES_SIDECAR_START" });
+    expect(String(error)).not.toContain("canary");
+    expect(JSON.stringify(error)).not.toContain("canary");
+    expect(verifyInstallation).not.toHaveBeenCalled();
+    expect(issueCapability).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(manager.state).toBe("crashed");
   });
 
   it("coalesces concurrent starts into one process", async () => {
@@ -687,11 +802,13 @@ function createManager(
   return new HermesSidecarManager({
     binding,
     dataRoot: "/opentrad-data",
+    workspaceRoot,
     issueCapability: defaultIssueCapability,
     launcherPath,
     paths,
     platform: "darwin",
     ensureStateDirs: vi.fn(async () => {}),
+    initializeProfileHome: defaultInitializeProfileHome,
     verifyInstallation: vi.fn(async () => {}),
     spawn: vi.fn<HermesSidecarSpawn>(() => child),
     terminatorFactory,
@@ -712,13 +829,19 @@ function validSpawnSpec() {
     command: paths.pythonExecutable,
     args: ["-I", "-S", "-B", "-u", "-X", "utf8", launcherPath] as const,
     cwd: paths.gatewayCwd,
-    env: { HERMES_HOME: paths.hermesHome },
+    env: {
+      HERMES_HOME: paths.hermesHome,
+      HERMES_BUNDLED_SKILLS: `${paths.runtimeRoot}/share/hermes/skills`,
+      OPENTRAD_WORKSPACE_ROOT: workspaceRoot,
+    },
   };
 }
 
 async function defaultIssueCapability(): Promise<HermesSidecarCapabilityLease> {
   return capabilityLease(endCapabilityPipe);
 }
+
+async function defaultInitializeProfileHome(): Promise<void> {}
 
 function capabilityLease(
   transmit: HermesSidecarCapabilityLease["transmit"],

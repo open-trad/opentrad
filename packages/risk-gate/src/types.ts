@@ -25,10 +25,13 @@ export interface RiskGateCheckRequest {
   businessAction?: string;
   // for UI 展示
   category?: string;
+  // 长时间等待 renderer 决策时，调用方用此 generation guard 撤销已经失效的请求。
+  // 回调抛错按已撤销处理；取消决策只审计，不写持久规则。
+  isCancelled?: () => boolean;
 }
 
 // 最终落到 audit_log + 返回给 mcp-server 的 decision
-export type DecisionKind = "allow" | "allow_once" | "allow_always" | "deny";
+export type DecisionKind = "allow" | "allow_once" | "allow_session" | "allow_always" | "deny";
 
 export interface CheckResult {
   decision: DecisionKind;
@@ -91,7 +94,12 @@ export interface PromptRequest {
   category: string | null;
 }
 
-export type UserDecisionKind = "allow_once" | "allow_always" | "deny" | "request_edit";
+export type UserDecisionKind =
+  | "allow_once"
+  | "allow_session"
+  | "allow_always"
+  | "deny"
+  | "request_edit";
 
 export interface UserDecision {
   kind: UserDecisionKind;

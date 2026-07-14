@@ -8,6 +8,7 @@
 
 import { mkdirSync } from "node:fs";
 import Database from "better-sqlite3";
+import { inspectDatabaseForMigration } from "./migration-inspection";
 import { getDbPath, getUserDataDir } from "./paths";
 import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema";
 
@@ -25,19 +26,45 @@ export function openDatabase(opts: OpenDbOptions = {}): Database.Database {
   }
 
   const db = new Database(dbPath);
-  db.pragma("foreign_keys = ON");
-  db.pragma("journal_mode = DELETE");
+  try {
+    // Inspect before persistent pragmas. In particular, journal_mode would mutate an
+    // unknown WAL database even if the physical schema is rejected immediately after.
+    inspectDatabaseForMigration(db);
+    db.pragma("foreign_keys = ON");
 
-  db.exec(SCHEMA_SQL);
-  ensureSchemaVersion(db);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      // The first inspection prevents any write against an already-unknown DB. The
+      // second closes the check-to-write race after the SQLite write lock is held.
+      inspectDatabaseForMigration(db, { transaction: "required" });
+      db.exec(SCHEMA_SQL);
+      ensureSchemaVersion(db);
+      if (inspectDatabaseForMigration(db, { transaction: "required" }).kind !== "current-v2") {
+        throw new Error("Database migration did not reach the expected schema");
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      if (db.inTransaction) db.exec("ROLLBACK");
+      throw error;
+    }
 
-  return db;
+    // journal_mode is persistent, so switch it only after the reviewed migration
+    // committed. Rejected schemas keep their original journal mode and bytes.
+    db.pragma("journal_mode = DELETE");
+
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }
 
 function ensureSchemaVersion(db: Database.Database): void {
-  // INSERT OR IGNORE：首次启动写入；后续启动幂等
+  // Physical-schema inspection is authoritative; this row is informational and is
+  // normalized only after the reviewed migration succeeds.
   const stmt = db.prepare(
-    "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+    `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
   );
   stmt.run("schema_version", JSON.stringify(SCHEMA_VERSION), Date.now());
 }

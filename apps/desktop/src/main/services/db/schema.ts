@@ -17,10 +17,9 @@
 //
 // 外键：events.session_id → sessions.id ON DELETE CASCADE。
 
-// M0 spike（重启方向）追加 3 张新表：provider_profiles / credentials / agent_events。
-// 均为纯新增（CREATE TABLE IF NOT EXISTS 幂等），不改旧表结构，故 SCHEMA_VERSION 不 bump
-// （版本号语义留给"改动既有表"的迁移，见 init.ts 注释；M1 正式迁移机制时再收编）。
-export const SCHEMA_VERSION = 1;
+// v2 只追加 agent_runtime_bindings，不改写既有表。init.ts 仍会先按物理指纹识别
+// 已知 v1，再在事务内执行此幂等 schema；未知结构一律拒绝迁移。
+export const SCHEMA_VERSION = 2;
 
 export const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sessions (
@@ -129,4 +128,27 @@ export const SCHEMA_SQL = `
     created_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_agent_sessions_created ON agent_sessions(created_at DESC);
+
+  -- OpenTrad 会话索引与 Hermes durable session 的恢复绑定。
+  -- Hermes state.db 仍是上下文真源；这里只保存 UI/恢复路由所需的最小元数据。
+  CREATE TABLE IF NOT EXISTS agent_runtime_bindings (
+    session_id TEXT PRIMARY KEY,
+    durable_session_id TEXT,
+    profile_id TEXT NOT NULL CHECK(length(profile_id) > 0),
+    workspace_root TEXT NOT NULL CHECK(length(workspace_root) > 0),
+    status TEXT NOT NULL CHECK(status IN (
+      'creating', 'active', 'idle', 'resuming', 'interrupted', 'closed', 'error', 'read_only'
+    )),
+    resumable INTEGER NOT NULL DEFAULT 0 CHECK(resumable IN (0, 1)),
+    generation INTEGER NOT NULL DEFAULT 0 CHECK(generation >= 0),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK(resumable = 0 OR durable_session_id IS NOT NULL),
+    FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id) ON DELETE CASCADE
+  );
+  -- A Hermes durable id is namespaced by the profile-specific HERMES_HOME. It is
+  -- intentionally unique per profile, not globally unique across profiles.
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runtime_bindings_durable
+    ON agent_runtime_bindings(profile_id, durable_session_id)
+    WHERE durable_session_id IS NOT NULL;
 `;

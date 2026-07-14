@@ -6,26 +6,26 @@ export const HERMES_GATEWAY_REQUEST_METHODS = [
   "session.resume",
   "session.status",
   "approval.respond",
+  "sudo.respond",
+  "secret.respond",
 ] as const;
 
 export type HermesGatewayRequestMethod = (typeof HERMES_GATEWAY_REQUEST_METHODS)[number];
 
-export type HermesSessionCreateParams = Readonly<Record<string, never>>;
+export interface HermesSessionCreateParams {
+  readonly cwd: string;
+  readonly source: "opentrad";
+  readonly model: string;
+  readonly provider: string;
+  readonly close_on_disconnect: false;
+}
 
 export interface HermesSessionCreateResult {
   readonly session_id: string;
   readonly stored_session_id: string;
-  readonly message_count: 0;
-  readonly messages: readonly [];
-  readonly persisted: false;
-  readonly resumable: false;
-  readonly info: Readonly<Record<string, unknown>> & {
-    readonly lazy: true;
-    readonly persisted: false;
-    readonly resumable: false;
-    readonly runtime: "hermes-quarantined";
-    readonly state: "quarantined";
-  };
+  readonly message_count: number;
+  readonly messages: readonly unknown[];
+  readonly info: Readonly<Record<string, unknown>>;
 }
 
 export interface HermesSessionResumeParams {
@@ -34,7 +34,7 @@ export interface HermesSessionResumeParams {
 
 export interface HermesSessionResumeResult {
   readonly session_id: string;
-  readonly resumed?: string;
+  readonly resumed: string;
   readonly message_count: number;
   readonly messages: readonly unknown[];
   readonly info: Readonly<Record<string, unknown>>;
@@ -70,7 +70,7 @@ export interface HermesSessionStatusResult {
   readonly output: string;
 }
 
-export type HermesApprovalChoice = "once" | "deny";
+export type HermesApprovalChoice = "once" | "session" | "always" | "deny";
 
 export interface HermesApprovalRespondParams {
   readonly session_id: string;
@@ -79,6 +79,20 @@ export interface HermesApprovalRespondParams {
 
 export interface HermesApprovalRespondResult {
   readonly resolved: number;
+}
+
+export interface HermesSudoRespondParams {
+  readonly request_id: string;
+  readonly password: string;
+}
+
+export interface HermesSecretRespondParams {
+  readonly request_id: string;
+  readonly value: string;
+}
+
+export interface HermesSensitiveRespondResult {
+  readonly status: "ok";
 }
 
 export interface HermesGatewayRpcMap {
@@ -109,6 +123,14 @@ export interface HermesGatewayRpcMap {
   readonly "approval.respond": {
     readonly params: HermesApprovalRespondParams;
     readonly result: HermesApprovalRespondResult;
+  };
+  readonly "sudo.respond": {
+    readonly params: HermesSudoRespondParams;
+    readonly result: HermesSensitiveRespondResult;
+  };
+  readonly "secret.respond": {
+    readonly params: HermesSecretRespondParams;
+    readonly result: HermesSensitiveRespondResult;
   };
 }
 

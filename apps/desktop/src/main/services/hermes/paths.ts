@@ -1,6 +1,7 @@
 import { constants as fsConstants, type Stats } from "node:fs";
 import { type FileHandle, lstat, mkdir, open } from "node:fs/promises";
 import { isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
+import { HermesProviderIdentifierPattern } from "@opentrad/shared";
 import { HERMES_AGENT_VERSION } from "./constants";
 
 export type HermesPlatform = "darwin" | "linux" | "win32";
@@ -38,6 +39,28 @@ export function resolveHermesPaths(dataRoot: string, platform: HermesPlatform): 
   return { runtimeRoot, hermesHome, gatewayCwd, pythonExecutable };
 }
 
+export function resolveHermesProfilePaths(
+  dataRoot: string,
+  profileId: string,
+  platform: HermesPlatform,
+): HermesPaths {
+  if (typeof profileId !== "string" || !HermesProviderIdentifierPattern.test(profileId)) {
+    throw new HermesPathSecurityError("profile id is invalid");
+  }
+
+  const path = platform === "win32" ? win32 : posix;
+  const shared = resolveHermesPaths(dataRoot, platform);
+  // Hermes v2026.7.7.2 treats only <root>/profiles/<id> as a named profile and then
+  // intentionally falls back to root-level/shared auth stores. OpenTrad needs credentials,
+  // sessions, plugins, and skills isolated per Provider Profile, so every home is a custom root.
+  const hermesHome = path.join(dataRoot, "hermes", "profile-homes", profileId);
+  return {
+    ...shared,
+    hermesHome,
+    gatewayCwd: path.join(hermesHome, "gateway-cwd"),
+  };
+}
+
 export async function ensureHermesStateDirs(
   paths: Pick<HermesPaths, "runtimeRoot" | "hermesHome" | "gatewayCwd">,
   options: EnsureHermesStateDirsOptions,
@@ -58,7 +81,14 @@ export async function ensureHermesStateDirs(
   ) {
     throw new HermesPathSecurityError("gateway cwd must be nested under HERMES_HOME");
   }
-  const targets = [paths.runtimeRoot, paths.hermesHome, paths.gatewayCwd].map((target) => {
+  const targets = [
+    paths.runtimeRoot,
+    paths.hermesHome,
+    join(paths.hermesHome, "gh-config"),
+    join(paths.hermesHome, "xdg-config"),
+    join(paths.hermesHome, "codex-home"),
+    paths.gatewayCwd,
+  ].map((target) => {
     if (!isAbsolute(target)) {
       throw new HermesPathSecurityError("managed path must be absolute");
     }

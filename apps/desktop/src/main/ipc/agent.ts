@@ -6,34 +6,52 @@
 //   invoke 立即返回；状态错误转 agent_error 事件（agent-service 内处理）
 // - agent:abort：中止会话
 // - agent:event：main → renderer push（本文件不 handle，只是发送端）
-// - agent:profiles:* / agent:credentials:*：Settings Providers 页 CRUD。
-//   secret 只进 main（safeStorage 加密落库），永不回读、永不进 log。
+// - agent:profiles:*：Settings Providers 页 CRUD；可选 secret 与 Profile 走同一 mutation，
+//   只进 main（safeStorage 加密落库），永不回读、永不进 log。
 
 import { type ProviderProfile, ProviderProfileSchema } from "@opentrad/model-providers";
 import {
   AgentAbortRequestSchema,
-  AgentCredentialDeleteRequestSchema,
-  AgentCredentialSetRequestSchema,
   AgentProfileDeleteRequestSchema,
   AgentProfileSaveRequestSchema,
   AgentSendRequestSchema,
   AgentSessionLoadRequestSchema,
   type AgentSessionMeta,
+  AgentSessionOpenRequestSchema,
+  type AgentSessionOpenResponse,
   AgentStartSessionRequestSchema,
   type AgentStartSessionResponse,
+  type AgentWorkspaceSelectResponse,
   IpcChannels,
 } from "@opentrad/shared";
-import { ipcMain } from "electron";
+import { BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from "electron";
 import type { AgentService } from "../services/agent-service";
-import type { SafeStorageCredentialStore } from "../services/credential-store";
+import { validateWorkspaceRoot } from "../services/workspace-root";
 
 export interface AgentHandlerDeps {
   agent: AgentService;
-  credentials: SafeStorageCredentialStore;
 }
 
 export function registerAgentHandlers(deps: AgentHandlerDeps): void {
-  const { agent, credentials } = deps;
+  const { agent } = deps;
+
+  ipcMain.handle(
+    IpcChannels.AgentWorkspaceSelect,
+    async (event): Promise<AgentWorkspaceSelectResponse> => {
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const options: OpenDialogOptions = {
+        title: "选择 Hermes 工作区",
+        buttonLabel: "使用此文件夹",
+        properties: ["openDirectory", "createDirectory"],
+      };
+      const result = owner
+        ? await dialog.showOpenDialog(owner, options)
+        : await dialog.showOpenDialog(options);
+      const selected = result.filePaths[0];
+      if (result.canceled || !selected) return null;
+      return { workspaceRoot: await validateWorkspaceRoot(selected) };
+    },
+  );
 
   ipcMain.handle(
     IpcChannels.AgentStartSession,
@@ -48,7 +66,7 @@ export function registerAgentHandlers(deps: AgentHandlerDeps): void {
           }
         },
       });
-      return { sessionId };
+      return { sessionId, resumable: agent.isSessionResumable(sessionId) };
     },
   );
 
@@ -62,6 +80,13 @@ export function registerAgentHandlers(deps: AgentHandlerDeps): void {
     agent.abort(req.sessionId);
   });
 
+  ipcMain.handle(
+    IpcChannels.AgentHermesInteractionResponse,
+    async (event, raw: unknown): Promise<boolean> => {
+      return agent.respondHermesInteraction(raw, event.sender.id);
+    },
+  );
+
   // ----- profiles -----
 
   ipcMain.handle(IpcChannels.AgentProfilesList, async (): Promise<ProviderProfile[]> => {
@@ -74,30 +99,14 @@ export function registerAgentHandlers(deps: AgentHandlerDeps): void {
       const req = AgentProfileSaveRequestSchema.parse(raw);
       // profile 形态校验（ProviderProfileSchema）在 domain 归属包做，shared 不重复定义
       const profile = ProviderProfileSchema.parse(req.profile);
-      return agent.saveProfile(profile);
+      return agent.saveProfile(profile, req.credential);
     },
   );
 
   ipcMain.handle(IpcChannels.AgentProfilesDelete, async (_event, raw: unknown): Promise<void> => {
     const req = AgentProfileDeleteRequestSchema.parse(raw);
-    agent.deleteProfile(req.id);
+    await agent.deleteProfile(req.id);
   });
-
-  // ----- credentials -----
-
-  ipcMain.handle(IpcChannels.AgentCredentialsSet, async (_event, raw: unknown): Promise<void> => {
-    const req = AgentCredentialSetRequestSchema.parse(raw);
-    // safeStorage 不可用时这里抛错 → renderer 收到 IPC error 明确提示，绝不静默明文落盘
-    await credentials.set(req.ref, req.secret);
-  });
-
-  ipcMain.handle(
-    IpcChannels.AgentCredentialsDelete,
-    async (_event, raw: unknown): Promise<void> => {
-      const req = AgentCredentialDeleteRequestSchema.parse(raw);
-      await credentials.delete(req.ref);
-    },
-  );
 
   // 会话历史：列表 + 回放
   ipcMain.handle(IpcChannels.AgentSessionsList, async (): Promise<AgentSessionMeta[]> => {
@@ -108,4 +117,17 @@ export function registerAgentHandlers(deps: AgentHandlerDeps): void {
     const req = AgentSessionLoadRequestSchema.parse(raw);
     return agent.loadSessionEvents(req.sessionId);
   });
+
+  ipcMain.handle(
+    IpcChannels.AgentSessionOpen,
+    async (event, raw: unknown): Promise<AgentSessionOpenResponse> => {
+      const req = AgentSessionOpenRequestSchema.parse(raw);
+      const sender = event.sender;
+      return agent.openSession(req.sessionId, {
+        send: (agentEvent) => {
+          if (!sender.isDestroyed()) sender.send(IpcChannels.AgentEvent, agentEvent);
+        },
+      });
+    },
+  );
 }

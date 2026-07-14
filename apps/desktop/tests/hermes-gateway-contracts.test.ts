@@ -13,6 +13,14 @@ import {
 
 const LIVE_SESSION_ID = "deadbeef";
 const STORED_SESSION_ID = "20260711_120000_abcdef";
+const PROMPT_REQUEST_ID = "feedface";
+const NATIVE_CREATE_PARAMS = {
+  cwd: "/workspace",
+  source: "opentrad",
+  model: "deepseek-chat",
+  provider: "deepseek",
+  close_on_disconnect: false,
+} as const;
 
 const PINNED_READY_FRAME = {
   jsonrpc: "2.0",
@@ -83,13 +91,13 @@ describe("Hermes v2026.7.7.2 gateway wire contract", () => {
 });
 
 describe("OpenTrad owned launcher request contracts", () => {
-  it("writes the exact empty external session.create params object", async () => {
+  it("writes the exact native session.create params object", async () => {
     const gateway = fakeGateway();
     const client = createClient(gateway);
     gateway.send(PINNED_READY_FRAME);
     await client.ready();
 
-    const request = client.request("session.create", {});
+    const request = client.request("session.create", NATIVE_CREATE_PARAMS);
     void request.catch(() => {});
     await Promise.resolve();
 
@@ -98,7 +106,7 @@ describe("OpenTrad owned launcher request contracts", () => {
         jsonrpc: "2.0",
         id: 1,
         method: "session.create",
-        params: {},
+        params: NATIVE_CREATE_PARAMS,
       },
     ]);
     gateway.send({
@@ -109,14 +117,13 @@ describe("OpenTrad owned launcher request contracts", () => {
         stored_session_id: STORED_SESSION_ID,
         message_count: 0,
         messages: [],
-        persisted: false,
-        resumable: false,
         info: {
+          cwd: "/workspace",
           lazy: true,
-          persisted: false,
-          resumable: false,
-          runtime: "hermes-quarantined",
-          state: "quarantined",
+          model: "deepseek-chat",
+          provider: "deepseek",
+          skills: {},
+          tools: {},
         },
       },
     });
@@ -129,22 +136,34 @@ describe("OpenTrad owned launcher request contracts", () => {
 
   it("accepts only the launcher-owned external parameter shapes", () => {
     const valid = [
-      ["session.create", {}],
+      ["session.create", NATIVE_CREATE_PARAMS],
       ["session.resume", { session_id: STORED_SESSION_ID }],
       ["session.status", { session_id: LIVE_SESSION_ID }],
       ["session.close", { session_id: LIVE_SESSION_ID }],
       ["session.interrupt", { session_id: LIVE_SESSION_ID }],
       ["prompt.submit", { session_id: LIVE_SESSION_ID, text: "continue" }],
       ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "once" }],
+      ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "session" }],
+      ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "always" }],
       ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "deny" }],
+      ["sudo.respond", { request_id: PROMPT_REQUEST_ID, password: "correct horse" }],
+      ["sudo.respond", { request_id: PROMPT_REQUEST_ID, password: "" }],
+      ["secret.respond", { request_id: PROMPT_REQUEST_ID, value: "sk-secret" }],
+      ["secret.respond", { request_id: PROMPT_REQUEST_ID, value: "" }],
     ] as const;
     for (const [method, params] of valid) {
       expect(isValidHermesGatewayRequestParams(method, params), method).toBe(true);
     }
 
     const invalid = [
-      ["session.create", { cwd: "/workspace", source: "opentrad", close_on_disconnect: true }],
-      ["session.create", { extra: "canary" }],
+      ["session.create", {}],
+      ["session.create", { ...NATIVE_CREATE_PARAMS, cwd: "relative/workspace" }],
+      ["session.create", { ...NATIVE_CREATE_PARAMS, source: "tui" }],
+      ["session.create", { ...NATIVE_CREATE_PARAMS, model: "  " }],
+      ["session.create", { ...NATIVE_CREATE_PARAMS, model: "deep\0seek" }],
+      ["session.create", { ...NATIVE_CREATE_PARAMS, provider: "" }],
+      ["session.create", { ...NATIVE_CREATE_PARAMS, close_on_disconnect: true }],
+      ["session.create", { ...NATIVE_CREATE_PARAMS, extra: "canary" }],
       ["session.resume", { session_id: LIVE_SESSION_ID }],
       ["session.resume", { session_id: STORED_SESSION_ID, cols: 120 }],
       ["session.status", { session_id: STORED_SESSION_ID }],
@@ -159,9 +178,22 @@ describe("OpenTrad owned launcher request contracts", () => {
         { session_id: LIVE_SESSION_ID, text: "continue", truncate_before_user_ordinal: 0 },
       ],
       ["approval.respond", { session_id: STORED_SESSION_ID, choice: "once" }],
-      ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "session" }],
-      ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "always" }],
+      ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "yes" }],
       ["approval.respond", { session_id: LIVE_SESSION_ID, choice: "once", all: false }],
+      ["sudo.respond", { request_id: "not-an-id", password: "password" }],
+      ["sudo.respond", { request_id: PROMPT_REQUEST_ID, password: "bad\0password" }],
+      ["sudo.respond", { request_id: PROMPT_REQUEST_ID, password: "p".repeat(4_097) }],
+      [
+        "sudo.respond",
+        { request_id: PROMPT_REQUEST_ID, password: "password", value: "secret-canary" },
+      ],
+      ["secret.respond", { request_id: "not-an-id", value: "secret" }],
+      ["secret.respond", { request_id: PROMPT_REQUEST_ID, value: "bad\0secret" }],
+      ["secret.respond", { request_id: PROMPT_REQUEST_ID, value: "s".repeat(65_537) }],
+      [
+        "secret.respond",
+        { request_id: PROMPT_REQUEST_ID, value: "secret", password: "secret-canary" },
+      ],
     ] as const;
     for (const [method, params] of invalid) {
       expect(isValidHermesGatewayRequestParams(method, params), method).toBe(false);
@@ -188,16 +220,15 @@ describe("OpenTrad owned launcher request contracts", () => {
 
   it("validates live and stored identifiers in session.create results", () => {
     const base = {
-      message_count: 0,
-      messages: [],
-      persisted: false,
-      resumable: false,
+      message_count: 1,
+      messages: [{ role: "assistant", content: "restored" }],
       info: {
+        cwd: "/workspace",
         lazy: true,
-        persisted: false,
-        resumable: false,
-        runtime: "hermes-quarantined",
-        state: "quarantined",
+        model: "deepseek-chat",
+        provider: "deepseek",
+        skills: {},
+        tools: {},
       },
     };
 
@@ -227,7 +258,7 @@ describe("OpenTrad owned launcher request contracts", () => {
         ...base,
         session_id: LIVE_SESSION_ID,
         stored_session_id: STORED_SESSION_ID,
-        message_count: 1,
+        message_count: -1,
       }),
     ).toBe(false);
     expect(
@@ -235,7 +266,59 @@ describe("OpenTrad owned launcher request contracts", () => {
         ...base,
         session_id: LIVE_SESSION_ID,
         stored_session_id: STORED_SESSION_ID,
-        messages: [{ role: "assistant" }],
+        messages: "not-an-array",
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts the pinned native session.resume result and requires its durable identity", () => {
+    const nativeResult = {
+      session_id: LIVE_SESSION_ID,
+      resumed: STORED_SESSION_ID,
+      message_count: 1,
+      messages: [{ role: "assistant", text: "restored" }],
+      info: { cwd: "/workspace", lazy: true },
+      inflight: null,
+      running: false,
+      session_key: STORED_SESSION_ID,
+      started_at: 1,
+      status: "idle",
+    } as const;
+
+    expect(isValidHermesGatewayRequestResult("session.resume", nativeResult)).toBe(true);
+    const { resumed: _resumed, ...withoutDurableIdentity } = nativeResult;
+    expect(isValidHermesGatewayRequestResult("session.resume", withoutDurableIdentity)).toBe(false);
+    expect(
+      isValidHermesGatewayRequestResult("session.resume", {
+        ...nativeResult,
+        session_key: "20260711_120001_abcdee",
+      }),
+    ).toBe(false);
+  });
+
+  it("bounds sensitive response values by Unicode scalar and UTF-8 size", () => {
+    expect(
+      isValidHermesGatewayRequestParams("sudo.respond", {
+        request_id: PROMPT_REQUEST_ID,
+        password: "\u{1f642}".repeat(4_096),
+      }),
+    ).toBe(true);
+    expect(
+      isValidHermesGatewayRequestParams("sudo.respond", {
+        request_id: PROMPT_REQUEST_ID,
+        password: `${"\u{1f642}".repeat(4_096)}a`,
+      }),
+    ).toBe(false);
+    expect(
+      isValidHermesGatewayRequestParams("secret.respond", {
+        request_id: PROMPT_REQUEST_ID,
+        value: "\u{1f642}".repeat(65_536),
+      }),
+    ).toBe(true);
+    expect(
+      isValidHermesGatewayRequestParams("secret.respond", {
+        request_id: PROMPT_REQUEST_ID,
+        value: `${"\u{1f642}".repeat(65_536)}a`,
       }),
     ).toBe(false);
   });
@@ -265,7 +348,7 @@ describe("OpenTrad owned launcher request contracts", () => {
   });
 
   it.each([
-    ["session.create", { cwd: "/workspace", source: "opentrad", closeOnDisconnect: true }],
+    ["session.create", { ...NATIVE_CREATE_PARAMS, cwd: "relative-secret-canary" }],
     ["session.resume", { sessionId: "stored-1" }],
     ["prompt.submit", { sessionId: "live-1", prompt: "hello" }],
     ["session.interrupt", { sessionId: "live-1" }],
@@ -273,6 +356,8 @@ describe("OpenTrad owned launcher request contracts", () => {
     ["session.status", { sessionId: "live-1" }],
     ["session.status", { session_id: "   " }],
     ["approval.respond", { sessionId: "live-1", choice: "once" }],
+    ["sudo.respond", { request_id: PROMPT_REQUEST_ID, password: "secret-canary", extra: true }],
+    ["secret.respond", { request_id: PROMPT_REQUEST_ID, value: "secret-canary", extra: true }],
   ] as const)("rejects invalid outbound params for %s before writing", async (method, params) => {
     const gateway = fakeGateway();
     const client = createClient(gateway);
@@ -318,7 +403,7 @@ describe("OpenTrad owned launcher request contracts", () => {
   it.each([
     [
       "session.create",
-      {},
+      NATIVE_CREATE_PARAMS,
       { session_id: "live-secret-canary", message_count: 0, messages: [], info: {} },
     ],
     [
@@ -360,6 +445,16 @@ describe("OpenTrad owned launcher request contracts", () => {
       { session_id: LIVE_SESSION_ID, choice: "once" },
       { resolved: "secret-result-canary" },
     ],
+    [
+      "sudo.respond",
+      { request_id: PROMPT_REQUEST_ID, password: "sudo-request-secret-canary" },
+      { status: "ok", password: "sudo-result-secret-canary" },
+    ],
+    [
+      "secret.respond",
+      { request_id: PROMPT_REQUEST_ID, value: "request-secret-canary" },
+      { status: "ok", value: "result-secret-canary" },
+    ],
   ] as const)("fails closed on a malformed %s result", async (method, params, result) => {
     const gateway = fakeGateway();
     const client = createClient(gateway);
@@ -378,6 +473,34 @@ describe("OpenTrad owned launcher request contracts", () => {
     expect(error).toMatchObject({ code: "HERMES_GATEWAY_PROTOCOL" });
     expect(JSON.stringify(error)).not.toContain("canary");
     expect(gateway.terminate).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["sudo.respond", { request_id: PROMPT_REQUEST_ID, password: "sudo-remote-secret-canary" }],
+    ["secret.respond", { request_id: PROMPT_REQUEST_ID, value: "remote-secret-canary" }],
+  ] as const)("does not reflect sensitive %s values from remote errors", async (method, params) => {
+    const gateway = fakeGateway();
+    const client = createClient(gateway);
+    gateway.send(PINNED_READY_FRAME);
+    await client.ready();
+    const unsafeRequest = client.request.bind(client) as (
+      method: string,
+      params: unknown,
+    ) => Promise<unknown>;
+    const pending = unsafeRequest(method, params);
+    await Promise.resolve();
+
+    gateway.send({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: 4009, message: JSON.stringify(params) },
+    });
+
+    const error = await pending.catch((cause: unknown) => cause);
+    expect(error).toMatchObject({ code: "HERMES_GATEWAY_REMOTE_ERROR", remoteCode: 4009 });
+    expect(JSON.stringify(error)).not.toContain("secret-canary");
+    expect(gateway.terminate).not.toHaveBeenCalled();
+    await client.dispose();
   });
 });
 

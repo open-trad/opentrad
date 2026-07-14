@@ -7,7 +7,7 @@
 // 事件订阅：首次 startSession 时懒订阅一次全局 agent:event，按 sessionId 过滤。
 
 import type { ProviderProfile } from "@opentrad/model-providers";
-import type { AgentEvent, AgentSessionMeta } from "@opentrad/shared";
+import type { AgentEvent, AgentSessionMeta, HermesRuntimeInstallProgress } from "@opentrad/shared";
 import { create } from "zustand";
 
 // 渲染项：AgentEvent 聚合后的展示形态（text/thinking 增量并进同 msgId 的一项）
@@ -39,25 +39,30 @@ export type AgentChatItem =
     }
   | { kind: "error"; message: string };
 
+export type AgentConversationContinuation = "ready" | "recovering" | "retryable" | "historical";
+
 interface AgentStoreState {
   profiles: ProviderProfile[];
   profilesLoaded: boolean;
   sessionId: string | null;
+  sessionProfileId: string | null;
+  sessionResumable: boolean | null;
+  workspaceRoot: string | null;
   // 会话头信息（agent_session_start）
   sessionModel: string | null;
   sessionTools: string[];
   items: AgentChatItem[];
   // 一轮进行中（send 后到 agent_session_result 之间）
   running: boolean;
-  // 会话终态（result subtype != success 后不能再 send）
-  ended: boolean;
+  // 对话能否继续。轮次结束不等于会话结束；失败恢复可重试。
+  continuation: AgentConversationContinuation;
   totalCostUsd: number | null;
   error: string | null;
+  runtimeInstallProgress: HermesRuntimeInstallProgress | null;
   // 会话历史（侧栏「任务」）
   sessions: AgentSessionMeta[];
-  // 正在查看历史会话（只读）；null = 实时会话
-  viewingHistory: boolean;
-
+  sessionsLoading: boolean;
+  sessionsError: string | null;
   loadProfiles: () => Promise<void>;
   saveProfile: (profile: ProviderProfile, apiKey?: string) => Promise<void>;
   deleteProfile: (id: string) => Promise<void>;
@@ -72,12 +77,16 @@ interface AgentStoreState {
   // 会话历史
   loadSessions: () => Promise<void>;
   loadSession: (sessionId: string) => Promise<void>;
+  retrySession: () => Promise<void>;
 }
 
 // 全局事件订阅只挂一次（模块级守卫）
 let subscribed = false;
 
 export const useAgentStore = create<AgentStoreState>((set, get) => {
+  let latestStartAttempt = 0;
+  let latestLoadAttempt = 0;
+
   function ensureSubscribed(): void {
     if (subscribed) return;
     subscribed = true;
@@ -91,15 +100,20 @@ export const useAgentStore = create<AgentStoreState>((set, get) => {
     profiles: [],
     profilesLoaded: false,
     sessionId: null,
+    sessionProfileId: null,
+    sessionResumable: null,
+    workspaceRoot: null,
     sessionModel: null,
     sessionTools: [],
     items: [],
     running: false,
-    ended: false,
+    continuation: "ready",
     totalCostUsd: null,
     error: null,
+    runtimeInstallProgress: null,
     sessions: [],
-    viewingHistory: false,
+    sessionsLoading: false,
+    sessionsError: null,
 
     loadProfiles: async () => {
       try {
@@ -110,64 +124,95 @@ export const useAgentStore = create<AgentStoreState>((set, get) => {
       }
     },
 
-    // apiKey 非空时先写凭证（safeStorage），再存 profile（credentialRef 已由调用方填好）
+    // Profile 与可选 API Key 经同一次 main mutation 提交，renderer 不持有独立凭证写入口。
     saveProfile: async (profile, apiKey) => {
-      if (apiKey && profile.credentialRef) {
-        await window.api.agent.setCredential({ ref: profile.credentialRef, secret: apiKey });
-      }
-      await window.api.agent.saveProfile(profile);
+      await window.api.agent.saveProfile(
+        profile,
+        apiKey && profile.credentialRef
+          ? { ref: profile.credentialRef, secret: apiKey }
+          : undefined,
+      );
       await get().loadProfiles();
     },
 
     deleteProfile: async (id) => {
-      const profile = get().profiles.find((p) => p.id === id);
       await window.api.agent.deleteProfile({ id });
-      // 级联清理孤儿凭证（profile 删了引用就没意义了）
-      if (profile?.credentialRef) {
-        await window.api.agent
-          .deleteCredential({ ref: profile.credentialRef })
-          .catch((err) => console.error("[agent-store] credential cleanup failed", err));
-      }
       await get().loadProfiles();
     },
 
     startSession: async (req) => {
+      const attempt = ++latestStartAttempt;
+      latestLoadAttempt += 1;
       ensureSubscribed();
       set({
         sessionId: null,
+        sessionProfileId: null,
+        sessionResumable: null,
+        workspaceRoot: null,
         sessionModel: null,
         sessionTools: [],
         items: [],
         running: false,
-        ended: false,
+        continuation: "ready",
         totalCostUsd: null,
         error: null,
-        viewingHistory: false,
+        runtimeInstallProgress: null,
       });
+      let acceptingProgress = true;
+      const unsubscribeProgress = window.api.installer.onHermesRuntimeInstallProgress(
+        (progress) => {
+          if (!acceptingProgress || attempt !== latestStartAttempt) return;
+          set({ runtimeInstallProgress: progress });
+        },
+      );
       try {
-        const { sessionId } = await window.api.agent.startSession({
+        const selected = await window.api.agent.selectWorkspace();
+        if (!selected) {
+          set({ error: "需要选择一个工作区才能创建 Hermes 会话" });
+          return;
+        }
+        const { sessionId, resumable } = await window.api.agent.startSession({
           profileId: req.profileId,
+          workspaceRoot: selected.workspaceRoot,
           maxSteps: 50,
           budgetUsd: null,
           enabledSites: req.enabledSites ?? [],
           mcpServers: req.mcpServers ?? [],
         });
-        set({ sessionId });
+        set({
+          sessionId,
+          sessionProfileId: req.profileId,
+          sessionResumable: resumable,
+          workspaceRoot: selected.workspaceRoot,
+        });
       } catch (err) {
         set({ error: err instanceof Error ? err.message : String(err) });
+      } finally {
+        acceptingProgress = false;
+        unsubscribeProgress();
+        if (attempt === latestStartAttempt) set({ runtimeInstallProgress: null });
       }
     },
 
     sendMessage: async (text) => {
-      const { sessionId, running, ended, viewingHistory } = get();
-      if (!sessionId || running || ended || viewingHistory) return;
-      set((s) => ({ items: [...s.items, { kind: "user", text }], running: true, error: null }));
+      const { sessionId, running, continuation } = get();
+      if (!sessionId || running || continuation !== "ready") return;
+      const optimisticUser: AgentChatItem = { kind: "user", text };
+      set((s) => ({ items: [...s.items, optimisticUser], running: true, error: null }));
       try {
         await window.api.agent.send({ sessionId, message: text });
         // 首条消息后会话有了标题，刷新侧栏历史
         void get().loadSessions();
       } catch (err) {
-        set({ running: false, error: err instanceof Error ? err.message : String(err) });
+        set((s) =>
+          s.sessionId === sessionId
+            ? {
+                items: s.items.filter((item) => item !== optimisticUser),
+                running: false,
+                error: err instanceof Error ? err.message : String(err),
+              }
+            : {},
+        );
       }
     },
 
@@ -180,50 +225,119 @@ export const useAgentStore = create<AgentStoreState>((set, get) => {
     },
 
     resetSession: () => {
+      latestLoadAttempt += 1;
       set({
         sessionId: null,
+        sessionProfileId: null,
+        sessionResumable: null,
+        workspaceRoot: null,
         sessionModel: null,
         sessionTools: [],
         items: [],
         running: false,
-        ended: false,
+        continuation: "ready",
         totalCostUsd: null,
         error: null,
-        viewingHistory: false,
+        runtimeInstallProgress: null,
       });
     },
 
     loadSessions: async () => {
+      set({ sessionsLoading: true, sessionsError: null });
       try {
         const sessions = await window.api.agent.listSessions();
-        set({ sessions });
+        set({ sessions, sessionsLoading: false, sessionsError: null });
       } catch (err) {
-        console.error("[agent-store] loadSessions failed", err);
+        set({
+          sessionsLoading: false,
+          sessionsError: err instanceof Error ? err.message : String(err),
+        });
       }
     },
 
-    // 打开历史会话（只读回放）：拉全部事件重建 items，sessionId 设为该会话但标记 viewingHistory
+    // 立即回放本地事件；durable Hermes binding 在 main 后台恢复。
     loadSession: async (sessionId) => {
+      const attempt = ++latestLoadAttempt;
       try {
-        const events = (await window.api.agent.loadSession(sessionId)) as StoredEvent[];
-        const meta = get().sessions.find((s) => s.sessionId === sessionId);
+        ensureSubscribed();
+        const opened = await window.api.agent.openSession(sessionId);
+        if (attempt !== latestLoadAttempt) return;
+        const events = opened.events as StoredEvent[];
+        const readOnly = opened.recovery === "read_only";
+        const resuming = opened.recovery === "resuming";
+        const liveActive = opened.recovery === "live" && opened.session.status === "active";
+        const continuation: AgentConversationContinuation = resuming
+          ? "recovering"
+          : readOnly
+            ? opened.session.resumable === true
+              ? "retryable"
+              : "historical"
+            : "ready";
         set({
           sessionId,
+          sessionProfileId: opened.session.profileId ?? null,
+          sessionResumable: opened.session.resumable ?? false,
+          workspaceRoot: opened.session.workspaceRoot ?? null,
           items: buildItemsFromEvents(events),
-          sessionModel: meta?.model ?? null,
+          sessionModel: opened.session.model,
           sessionTools: [],
-          running: false,
-          ended: true,
+          running: liveActive,
+          continuation,
           totalCostUsd: null,
           error: null,
-          viewingHistory: true,
+          runtimeInstallProgress: null,
         });
+        if (resuming) {
+          void waitForRecovery(sessionId, set, get, () => attempt === latestLoadAttempt);
+        }
       } catch (err) {
-        set({ error: err instanceof Error ? err.message : String(err) });
+        if (attempt === latestLoadAttempt) {
+          set({ error: err instanceof Error ? err.message : String(err) });
+        }
       }
+    },
+
+    retrySession: async () => {
+      const { sessionId } = get();
+      if (!sessionId) return;
+      await get().loadSession(sessionId);
     },
   };
 });
+
+async function waitForRecovery(
+  sessionId: string,
+  set: SetFn,
+  get: GetFn,
+  isCurrent: () => boolean,
+): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline && get().sessionId === sessionId && isCurrent()) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const sessions = await window.api.agent.listSessions().catch(() => []);
+    if (!isCurrent()) return;
+    const current = sessions.find((session) => session.sessionId === sessionId);
+    if (!current?.status || current.status === "resuming") continue;
+    set({ sessions });
+    if (current.status === "idle" || current.status === "active") {
+      set({ running: false, continuation: "ready" });
+    } else {
+      set({
+        running: false,
+        continuation: current.resumable ? "retryable" : "historical",
+        error: "Hermes 会话恢复失败；本地历史仍可查看，可点击“重试恢复”继续",
+      });
+    }
+    return;
+  }
+  if (get().sessionId === sessionId && isCurrent()) {
+    set({
+      running: false,
+      continuation: "retryable",
+      error: "Hermes 会话恢复超时；本地历史仍可查看，可点击“重试恢复”继续",
+    });
+  }
+}
 
 // 回放：持久化事件（含 agent_user 用户消息）重建为渲染项。
 // 与 applyEvent 逻辑一致，但一次性构建数组（非增量 set/get）。
@@ -390,7 +504,16 @@ function applyEvent(evt: AgentEvent, set: SetFn, get: GetFn): void {
         ],
       }));
       break;
-    case "agent_session_result":
+    case "agent_session_result": {
+      const resumable = get().sessionResumable;
+      const continuation: AgentConversationContinuation =
+        evt.subtype === "success"
+          ? "ready"
+          : evt.subtype === "aborted" && resumable === true
+            ? "ready"
+            : resumable === false
+              ? "historical"
+              : "retryable";
       set((s) => ({
         items: [
           ...s.items,
@@ -403,10 +526,11 @@ function applyEvent(evt: AgentEvent, set: SetFn, get: GetFn): void {
           },
         ],
         running: false,
-        ended: evt.subtype !== "success",
+        continuation,
         totalCostUsd: evt.totalCostUsd,
       }));
       break;
+    }
     case "agent_error":
       set((s) => ({ items: [...s.items, { kind: "error", message: evt.message }] }));
       break;

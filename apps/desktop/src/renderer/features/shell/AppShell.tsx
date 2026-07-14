@@ -28,7 +28,8 @@ import {
 } from "lucide-react";
 import { type ReactElement, type ReactNode, useEffect, useMemo, useState } from "react";
 import { useAgentStore } from "../../stores/agent";
-import { AgentChatPanel } from "../agent/AgentChatPanel";
+import { AgentChatPanel, HermesRuntimeInstallProgressNotice } from "../agent/AgentChatPanel";
+import { HermesInteractionOverlay } from "../agent/HermesInteractionOverlay";
 import { PluginsPage } from "../plugins/PluginsPage";
 import { ProvidersTab } from "../settings/ProvidersTab";
 
@@ -108,6 +109,7 @@ export function AppShell(): ReactElement {
           </div>
         ) : null}
       </main>
+      <HermesInteractionOverlay />
     </div>
   );
 }
@@ -190,7 +192,10 @@ function Sidebar({
   onOpenSession: () => void;
 }): ReactElement {
   const sessions = useAgentStore((s) => s.sessions);
+  const sessionsLoading = useAgentStore((s) => s.sessionsLoading);
+  const sessionsError = useAgentStore((s) => s.sessionsError);
   const currentSessionId = useAgentStore((s) => s.sessionId);
+  const loadSessions = useAgentStore((s) => s.loadSessions);
   const loadSession = useAgentStore((s) => s.loadSession);
 
   const navItems: { key: View; label: string; icon: ReactElement; onClick?: () => void }[] = [
@@ -257,23 +262,23 @@ function Sidebar({
       {/* 任务历史 */}
       <div style={{ marginTop: 14, padding: "0 10px", flex: 1, overflowY: "auto", minHeight: 0 }}>
         <div style={sectionLabel}>任务</div>
-        {sessions.length === 0 ? (
-          <div style={{ fontSize: "0.78rem", color: C.subDim, padding: "0.4rem 0.6rem" }}>
-            暂无历史，从「新任务」开始
-          </div>
-        ) : (
-          sessions.map((s) => (
-            <SessionRow
-              key={s.sessionId}
-              session={s}
-              active={s.sessionId === currentSessionId}
-              onClick={async () => {
-                await loadSession(s.sessionId);
-                onOpenSession();
-              }}
-            />
-          ))
-        )}
+        <SessionHistoryStatus
+          loading={sessionsLoading}
+          error={sessionsError}
+          isEmpty={sessions.length === 0}
+          onRetry={() => void loadSessions()}
+        />
+        {sessions.map((s) => (
+          <SessionRow
+            key={s.sessionId}
+            session={s}
+            active={s.sessionId === currentSessionId}
+            onClick={async () => {
+              await loadSession(s.sessionId);
+              onOpenSession();
+            }}
+          />
+        ))}
 
         <div
           style={{ ...sectionLabel, marginTop: 16, display: "flex", alignItems: "center", gap: 6 }}
@@ -318,6 +323,65 @@ function Sidebar({
       </div>
     </aside>
   );
+}
+
+export function SessionHistoryStatus({
+  loading,
+  error,
+  isEmpty,
+  onRetry,
+}: {
+  loading: boolean;
+  error: string | null;
+  isEmpty: boolean;
+  onRetry: () => void;
+}): ReactElement | null {
+  if (error) {
+    return (
+      <div
+        role="alert"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          color: "#b91c1c",
+          fontSize: "0.78rem",
+          padding: "0.4rem 0.6rem",
+        }}
+      >
+        <span>历史加载失败</span>
+        <button
+          type="button"
+          onClick={onRetry}
+          style={{
+            border: "none",
+            background: "transparent",
+            color: "#15803d",
+            cursor: "pointer",
+            padding: 0,
+            fontSize: "inherit",
+          }}
+        >
+          重试
+        </button>
+      </div>
+    );
+  }
+  if (loading && isEmpty) {
+    return (
+      <div style={{ fontSize: "0.78rem", color: C.subDim, padding: "0.4rem 0.6rem" }}>
+        正在加载历史…
+      </div>
+    );
+  }
+  if (isEmpty) {
+    return (
+      <div style={{ fontSize: "0.78rem", color: C.subDim, padding: "0.4rem 0.6rem" }}>
+        暂无历史，从「新任务」开始
+      </div>
+    );
+  }
+  return null;
 }
 
 function LogoMark(): ReactElement {
@@ -429,6 +493,7 @@ function HomeHero({
   const profiles = useAgentStore((s) => s.profiles);
   const startSession = useAgentStore((s) => s.startSession);
   const sendMessage = useAgentStore((s) => s.sendMessage);
+  const runtimeInstallProgress = useAgentStore((s) => s.runtimeInstallProgress);
   const [text, setText] = useState("");
   const [profileId, setProfileId] = useState("");
   const [enabledSites, setEnabledSites] = useState<string[]>([]);
@@ -597,6 +662,10 @@ function HomeHero({
             </div>
           </div>
         </div>
+
+        {starting && runtimeInstallProgress ? (
+          <HermesRuntimeInstallProgressNotice progress={runtimeInstallProgress} />
+        ) : null}
 
         {/* 场景 chips */}
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>

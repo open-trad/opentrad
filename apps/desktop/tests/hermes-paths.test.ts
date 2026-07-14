@@ -10,6 +10,7 @@ import {
   type HermesPaths,
   type HermesPlatform,
   resolveHermesPaths,
+  resolveHermesProfilePaths,
 } from "../src/main/services/hermes/paths";
 
 const tempDirs: string[] = [];
@@ -37,6 +38,9 @@ function getManagedDescendants(dataRoot: string, paths: HermesPaths): string[] {
     hostPath.join(dataRoot, "runtimes", "hermes"),
     paths.runtimeRoot,
     paths.hermesHome,
+    hostPath.join(paths.hermesHome, "gh-config"),
+    hostPath.join(paths.hermesHome, "xdg-config"),
+    hostPath.join(paths.hermesHome, "codex-home"),
     paths.gatewayCwd,
   ];
 }
@@ -54,6 +58,71 @@ describe("Hermes managed paths", () => {
   it("pins the supported Hermes Agent release", () => {
     expect(HERMES_AGENT_VERSION).toBe("0.18.2");
     expect(HERMES_RELEASE_TAG).toBe("v2026.7.7.2");
+  });
+
+  it("isolates each profile home while sharing the pinned runtime", () => {
+    const first = resolveHermesProfilePaths("/var/lib/opentrad", "profile-alpha", "darwin");
+    const second = resolveHermesProfilePaths("/var/lib/opentrad", "profile-beta", "darwin");
+
+    expect(first.runtimeRoot).toBe(second.runtimeRoot);
+    expect(first.pythonExecutable).toBe(second.pythonExecutable);
+    expect(first.hermesHome).toBe("/var/lib/opentrad/hermes/profile-homes/profile-alpha");
+    expect(first.gatewayCwd).toBe(
+      "/var/lib/opentrad/hermes/profile-homes/profile-alpha/gateway-cwd",
+    );
+    expect(second.hermesHome).toBe("/var/lib/opentrad/hermes/profile-homes/profile-beta");
+    expect(second.gatewayCwd).toBe(
+      "/var/lib/opentrad/hermes/profile-homes/profile-beta/gateway-cwd",
+    );
+  });
+
+  it("uses a custom root that Hermes 0.18.2 cannot reinterpret as a shared named profile", () => {
+    const paths = resolveHermesProfilePaths("/var/lib/opentrad", "profile.alpha:1", "darwin");
+
+    // Hermes v2026.7.7.2 treats only <root>/profiles/<id> as a named profile and then
+    // falls back to <root>/auth.json and <root>/shared/nous_auth.json. OpenTrad homes
+    // must remain custom roots so those cross-Profile fallbacks are unreachable.
+    expect(posix.basename(posix.dirname(paths.hermesHome))).not.toBe("profiles");
+    const hermesDetectedRoot =
+      posix.basename(posix.dirname(paths.hermesHome)) === "profiles"
+        ? posix.dirname(posix.dirname(paths.hermesHome))
+        : paths.hermesHome;
+    expect(hermesDetectedRoot).toBe(paths.hermesHome);
+    expect(posix.join(hermesDetectedRoot, "auth.json")).toBe(
+      "/var/lib/opentrad/hermes/profile-homes/profile.alpha:1/auth.json",
+    );
+    expect(posix.join(hermesDetectedRoot, "shared", "nous_auth.json")).toBe(
+      "/var/lib/opentrad/hermes/profile-homes/profile.alpha:1/shared/nous_auth.json",
+    );
+  });
+
+  it.each([
+    "",
+    ".",
+    "..",
+    "profile/escape",
+    String.raw`profile\\escape`,
+    "profile space",
+    "配置",
+    `p${"x".repeat(128)}`,
+  ])("rejects unsafe profile id %j before resolving a profile home", (profileId) => {
+    expect(() => resolveHermesProfilePaths("/var/lib/opentrad", profileId, "darwin")).toThrowError(
+      expect.objectContaining({
+        name: "HermesPathSecurityError",
+        code: "HERMES_PATH_SECURITY",
+      }),
+    );
+  });
+
+  it.each([
+    "profile.alpha",
+    "profile:alpha",
+    "profile_alpha",
+    "profile-alpha",
+  ])("accepts schema-safe profile id %j", (profileId) => {
+    expect(
+      resolveHermesProfilePaths("/var/lib/opentrad", profileId, "darwin").hermesHome,
+    ).toContain(profileId);
   });
 
   it.each([
@@ -269,6 +338,9 @@ describe("Hermes managed paths", () => {
     await Promise.all([
       mkdir(paths.runtimeRoot, { recursive: true }),
       mkdir(paths.gatewayCwd, { recursive: true }),
+      mkdir(hostPath.join(paths.hermesHome, "gh-config"), { recursive: true }),
+      mkdir(hostPath.join(paths.hermesHome, "xdg-config"), { recursive: true }),
+      mkdir(hostPath.join(paths.hermesHome, "codex-home"), { recursive: true }),
     ]);
     const managedDirs = [dataRoot, ...getManagedDescendants(dataRoot, paths)];
     if (!realHostIsWindows) {
@@ -293,6 +365,9 @@ describe("Hermes managed paths", () => {
     await Promise.all([
       mkdir(paths.runtimeRoot, { recursive: true }),
       mkdir(paths.gatewayCwd, { recursive: true }),
+      mkdir(hostPath.join(paths.hermesHome, "gh-config"), { recursive: true }),
+      mkdir(hostPath.join(paths.hermesHome, "xdg-config"), { recursive: true }),
+      mkdir(hostPath.join(paths.hermesHome, "codex-home"), { recursive: true }),
     ]);
     const managedDirs = [dataRoot, ...getManagedDescendants(dataRoot, paths)];
     await Promise.all(managedDirs.map((dir) => chmod(dir, 0o755)));

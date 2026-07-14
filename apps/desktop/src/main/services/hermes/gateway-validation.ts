@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import type {
   HermesGatewayRequestMethod,
   HermesGatewayRequestParams,
@@ -10,19 +11,65 @@ const LIVE_SESSION_ID_PATTERN = /^[0-9a-f]{8}$/u;
 const STORED_SESSION_ID_PATTERN = /^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$/u;
 const MAX_PROMPT_CHARACTERS = 262_144;
 const MAX_PROMPT_UTF8_BYTES = 1024 * 1024;
+const MAX_CWD_CHARACTERS = 4_096;
+const MAX_CWD_UTF8_BYTES = 16_384;
+const MAX_MODEL_OR_PROVIDER_CHARACTERS = 512;
+const MAX_MODEL_OR_PROVIDER_UTF8_BYTES = 2_048;
+const MAX_SUDO_PASSWORD_CHARACTERS = 4_096;
+const MAX_SUDO_PASSWORD_UTF8_BYTES = 16_384;
+const MAX_SECRET_VALUE_CHARACTERS = 65_536;
+const MAX_SECRET_VALUE_UTF8_BYTES = 262_144;
+const SESSION_CREATE_RESULT_KEYS = new Set([
+  "session_id",
+  "stored_session_id",
+  "message_count",
+  "messages",
+  "info",
+]);
+const SESSION_RESUME_RESULT_KEYS = new Set([
+  "session_id",
+  "resumed",
+  "message_count",
+  "messages",
+  "info",
+  "inflight",
+  "running",
+  "session_key",
+  "started_at",
+  "status",
+]);
+const SENSITIVE_RESPOND_RESULT_KEYS = new Set(["status"]);
 
 const REQUEST_KEYS: Readonly<Record<HermesGatewayRequestMethod, ReadonlySet<string>>> = {
-  "session.create": new Set(),
+  "session.create": new Set(["cwd", "source", "model", "provider", "close_on_disconnect"]),
   "session.resume": new Set(["session_id"]),
   "prompt.submit": new Set(["session_id", "text"]),
   "session.interrupt": new Set(["session_id"]),
   "session.close": new Set(["session_id"]),
   "session.status": new Set(["session_id"]),
   "approval.respond": new Set(["session_id", "choice"]),
+  "sudo.respond": new Set(["request_id", "password"]),
+  "secret.respond": new Set(["request_id", "value"]),
 };
 
 const REQUEST_VALIDATORS: Readonly<Record<HermesGatewayRequestMethod, Validator>> = {
-  "session.create": isRecord,
+  "session.create": (value) =>
+    isRecord(value) &&
+    isValidAbsoluteCwd(value.cwd) &&
+    value.source === "opentrad" &&
+    isBoundedNonNulUnicodeString(
+      value.model,
+      MAX_MODEL_OR_PROVIDER_CHARACTERS,
+      MAX_MODEL_OR_PROVIDER_UTF8_BYTES,
+      true,
+    ) &&
+    isBoundedNonNulUnicodeString(
+      value.provider,
+      MAX_MODEL_OR_PROVIDER_CHARACTERS,
+      MAX_MODEL_OR_PROVIDER_UTF8_BYTES,
+      true,
+    ) &&
+    value.close_on_disconnect === false,
   "session.resume": (value) => isRecord(value) && isStoredSessionId(value.session_id),
   "prompt.submit": (value) =>
     isRecord(value) && isLiveSessionId(value.session_id) && isValidPromptText(value.text),
@@ -32,36 +79,52 @@ const REQUEST_VALIDATORS: Readonly<Record<HermesGatewayRequestMethod, Validator>
   "approval.respond": (value) =>
     isRecord(value) &&
     isLiveSessionId(value.session_id) &&
-    (value.choice === "once" || value.choice === "deny"),
+    (value.choice === "once" ||
+      value.choice === "session" ||
+      value.choice === "always" ||
+      value.choice === "deny"),
+  "sudo.respond": (value) =>
+    isRecord(value) &&
+    isPromptRequestId(value.request_id) &&
+    isEmptyOrBoundedNonNulUnicodeString(
+      value.password,
+      MAX_SUDO_PASSWORD_CHARACTERS,
+      MAX_SUDO_PASSWORD_UTF8_BYTES,
+    ),
+  "secret.respond": (value) =>
+    isRecord(value) &&
+    isPromptRequestId(value.request_id) &&
+    isEmptyOrBoundedNonNulUnicodeString(
+      value.value,
+      MAX_SECRET_VALUE_CHARACTERS,
+      MAX_SECRET_VALUE_UTF8_BYTES,
+    ),
 };
 
 const RESULT_VALIDATORS: Readonly<Record<HermesGatewayRequestMethod, Validator>> = {
   "session.create": (value) =>
     isRecord(value) &&
+    hasExactlyKeys(value, SESSION_CREATE_RESULT_KEYS) &&
     isLiveSessionId(value.session_id) &&
     isStoredSessionId(value.stored_session_id) &&
-    value.message_count === 0 &&
+    isNonNegativeInteger(value.message_count) &&
     Array.isArray(value.messages) &&
-    value.messages.length === 0 &&
-    value.persisted === false &&
-    value.resumable === false &&
-    isRecord(value.info) &&
-    value.info.lazy === true &&
-    value.info.persisted === false &&
-    value.info.resumable === false &&
-    value.info.runtime === "hermes-quarantined" &&
-    value.info.state === "quarantined",
+    value.messages.length === value.message_count &&
+    isRecord(value.info),
   "session.resume": (value) =>
     isRecord(value) &&
+    hasOnlyKeys(value, SESSION_RESUME_RESULT_KEYS) &&
     isLiveSessionId(value.session_id) &&
-    (value.resumed === undefined || isStoredSessionId(value.resumed)) &&
+    isStoredSessionId(value.resumed) &&
     isNonNegativeInteger(value.message_count) &&
     Array.isArray(value.messages) &&
     isRecord(value.info) &&
     typeof value.running === "boolean" &&
-    isNonEmptyString(value.session_key) &&
+    isStoredSessionId(value.session_key) &&
+    value.session_key === value.resumed &&
     typeof value.started_at === "number" &&
     Number.isFinite(value.started_at) &&
+    value.started_at >= 0 &&
     (value.status === "idle" ||
       value.status === "starting" ||
       value.status === "waiting" ||
@@ -74,6 +137,8 @@ const RESULT_VALIDATORS: Readonly<Record<HermesGatewayRequestMethod, Validator>>
   "session.close": (value) => isRecord(value) && typeof value.closed === "boolean",
   "session.status": (value) => isRecord(value) && typeof value.output === "string",
   "approval.respond": (value) => isRecord(value) && isNonNegativeInteger(value.resolved),
+  "sudo.respond": isSensitiveRespondResult,
+  "secret.respond": isSensitiveRespondResult,
 };
 
 export function isValidHermesGatewayRequestParams<TMethod extends HermesGatewayRequestMethod>(
@@ -106,6 +171,11 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: ReadonlySet<string
   return Object.keys(value).every((key) => allowed.has(key));
 }
 
+function hasExactlyKeys(value: Record<string, unknown>, expected: ReadonlySet<string>): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.size && keys.every((key) => expected.has(key));
+}
+
 function hasLiveSessionId(value: unknown): boolean {
   return isRecord(value) && isLiveSessionId(value.session_id);
 }
@@ -118,8 +188,54 @@ function isStoredSessionId(value: unknown): value is string {
   return typeof value === "string" && STORED_SESSION_ID_PATTERN.test(value);
 }
 
+function isPromptRequestId(value: unknown): value is string {
+  return isLiveSessionId(value);
+}
+
 function isValidPromptText(value: unknown): value is string {
-  if (typeof value !== "string") return false;
+  return isBoundedUnicodeString(value, MAX_PROMPT_CHARACTERS, MAX_PROMPT_UTF8_BYTES, true);
+}
+
+function isValidAbsoluteCwd(value: unknown): value is string {
+  return (
+    isBoundedNonNulUnicodeString(value, MAX_CWD_CHARACTERS, MAX_CWD_UTF8_BYTES, true) &&
+    isAbsolute(value)
+  );
+}
+
+function isSensitiveRespondResult(value: unknown): boolean {
+  return (
+    isRecord(value) && hasExactlyKeys(value, SENSITIVE_RESPOND_RESULT_KEYS) && value.status === "ok"
+  );
+}
+
+function isBoundedNonNulUnicodeString(
+  value: unknown,
+  maxCharacters: number,
+  maxUtf8Bytes: number,
+  requireNonWhitespace: boolean,
+): value is string {
+  return (
+    isBoundedUnicodeString(value, maxCharacters, maxUtf8Bytes, requireNonWhitespace) &&
+    !value.includes("\0")
+  );
+}
+
+function isEmptyOrBoundedNonNulUnicodeString(
+  value: unknown,
+  maxCharacters: number,
+  maxUtf8Bytes: number,
+): value is string {
+  return value === "" || isBoundedNonNulUnicodeString(value, maxCharacters, maxUtf8Bytes, false);
+}
+
+function isBoundedUnicodeString(
+  value: unknown,
+  maxCharacters: number,
+  maxUtf8Bytes: number,
+  requireNonWhitespace: boolean,
+): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
 
   let characters = 0;
   let utf8Bytes = 0;
@@ -138,12 +254,12 @@ function isValidPromptText(value: unknown): value is string {
     }
 
     characters += 1;
-    if (characters > MAX_PROMPT_CHARACTERS) return false;
+    if (characters > maxCharacters) return false;
     utf8Bytes += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
-    if (utf8Bytes > MAX_PROMPT_UTF8_BYTES) return false;
+    if (utf8Bytes > maxUtf8Bytes) return false;
     if (!isPythonWhitespace(codePoint)) hasNonWhitespace = true;
   }
-  return hasNonWhitespace;
+  return !requireNonWhitespace || hasNonWhitespace;
 }
 
 function isPythonWhitespace(codePoint: number): boolean {
@@ -164,10 +280,6 @@ function isPythonWhitespace(codePoint: number): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
 }
 
 function isNonNegativeInteger(value: unknown): value is number {

@@ -7,7 +7,12 @@ export interface DatabaseInspectionPort {
   prepare(source: string): { all(...params: readonly unknown[]): unknown };
 }
 
-export type KnownDatabaseSchemaKind = "empty" | "legacy-core-v1" | "legacy-agent-v1" | "current-v1";
+export type KnownDatabaseSchemaKind =
+  | "empty"
+  | "legacy-core-v1"
+  | "legacy-agent-v1"
+  | "current-v1"
+  | "current-v2";
 
 export interface DatabaseMigrationInspection {
   readonly kind: KnownDatabaseSchemaKind;
@@ -15,11 +20,16 @@ export interface DatabaseMigrationInspection {
   readonly objectCount: number;
 }
 
+export interface DatabaseMigrationInspectionOptions {
+  readonly transaction?: "forbidden" | "required";
+}
+
 export const KNOWN_DATABASE_SCHEMA_FINGERPRINTS = Object.freeze({
   empty: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   legacyCoreV1: "387c36f630629969bee2a0b5399b79e1cf06c94e72bdadc21f5a25ec72e8ab70",
   legacyAgentV1: "f1c2943679a0eb245db9942cfa71054226e4c2ecd18c418449ed19ad88f9370a",
   currentV1: "93bc4fdce92d08c60923c3157226ba7565504f0a032e87dccc18d5aad9a0d061",
+  currentV2: "e7c739bf25107bbe221cb450dc59cf153d3478b83e2db72bb7877efdfccfc685",
 });
 
 export type DatabaseMigrationInspectionErrorCode =
@@ -48,6 +58,7 @@ const KIND_BY_FINGERPRINT = new Map<string, KnownDatabaseSchemaKind>([
   [KNOWN_DATABASE_SCHEMA_FINGERPRINTS.legacyCoreV1, "legacy-core-v1"],
   [KNOWN_DATABASE_SCHEMA_FINGERPRINTS.legacyAgentV1, "legacy-agent-v1"],
   [KNOWN_DATABASE_SCHEMA_FINGERPRINTS.currentV1, "current-v1"],
+  [KNOWN_DATABASE_SCHEMA_FINGERPRINTS.currentV2, "current-v2"],
 ]);
 
 export class DatabaseMigrationInspectionError extends Error {
@@ -88,8 +99,9 @@ export function fingerprintDatabaseSchema(db: DatabaseInspectionPort): string {
 
 export function inspectDatabaseForMigration(
   db: DatabaseInspectionPort,
+  options: DatabaseMigrationInspectionOptions = {},
 ): DatabaseMigrationInspection {
-  const port = snapshotInspectionPort(db);
+  const port = snapshotInspectionPort(db, options.transaction ?? "forbidden");
   validateIntegrity(port);
   validateForeignKeys(port);
 
@@ -227,7 +239,10 @@ function validateForeignKeys(db: OwnedDatabaseInspectionPort): void {
   db.assertAvailable();
 }
 
-function snapshotInspectionPort(value: unknown): OwnedDatabaseInspectionPort {
+function snapshotInspectionPort(
+  value: unknown,
+  transaction: "forbidden" | "required" = "forbidden",
+): OwnedDatabaseInspectionPort {
   try {
     if (!isObjectLike(value)) throw new Error();
     const receiver = value as object;
@@ -235,7 +250,7 @@ function snapshotInspectionPort(value: unknown): OwnedDatabaseInspectionPort {
     const prepare = Reflect.get(receiver, "prepare");
     if (typeof pragma !== "function" || typeof prepare !== "function") throw new Error();
     const port: OwnedDatabaseInspectionPort = Object.freeze({
-      assertAvailable: () => assertReceiverAvailable(receiver),
+      assertAvailable: () => assertReceiverAvailable(receiver, transaction),
       pragma: (source: string) => Reflect.apply(pragma, receiver, [source]),
       readSchema: () => {
         const statement = Reflect.apply(prepare, receiver, [SCHEMA_QUERY]);
@@ -252,11 +267,12 @@ function snapshotInspectionPort(value: unknown): OwnedDatabaseInspectionPort {
   }
 }
 
-function assertReceiverAvailable(receiver: object): void {
+function assertReceiverAvailable(receiver: object, transaction: "forbidden" | "required"): void {
   try {
+    const expectedTransactionState = transaction === "required";
     if (
       Reflect.get(receiver, "open") !== true ||
-      Reflect.get(receiver, "inTransaction") !== false
+      Reflect.get(receiver, "inTransaction") !== expectedTransactionState
     ) {
       throw new Error();
     }

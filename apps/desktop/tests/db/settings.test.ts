@@ -14,8 +14,8 @@ describe("SettingsService", () => {
     svc.close();
   });
 
-  it("初始化时已写入 schema_version=1", () => {
-    expect(svc.settings.get("schema_version")).toBe(1);
+  it("初始化时已写入 schema_version=2", () => {
+    expect(svc.settings.get("schema_version")).toBe(2);
   });
 
   it("set + get：写读循环（任意 JSON 值）", () => {

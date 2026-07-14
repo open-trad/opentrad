@@ -12,24 +12,32 @@ import {
   type AuthStartLoginFlowRequest,
   AuthStartLoginFlowRequestSchema,
   type AuthStartLoginFlowResponse,
+  type HermesOAuthStartRequest,
+  HermesOAuthStartRequestSchema,
+  type HermesOAuthStartResponse,
+  HermesOAuthStartResponseSchema,
   IpcChannels,
   type ShellOpenExternalRequest,
   ShellOpenExternalRequestSchema,
 } from "@opentrad/shared";
 import { ipcMain, shell } from "electron";
 import { getApiKeyLoginCommand, getClaudeAiLoginCommand } from "../services/auth-login";
+import type { HermesOAuthPtyCoordinator } from "../services/hermes/oauth-login";
 import type { PtyManager } from "../services/pty-manager";
+import type { PtySubscriberRouter } from "../services/pty-subscriber-router";
 
 export interface AuthHandlerDeps {
   pty: PtyManager;
+  ptyRouter: PtySubscriberRouter;
+  hermesOAuth: HermesOAuthPtyCoordinator;
 }
 
 export function registerAuthHandlers(deps: AuthHandlerDeps): void {
-  const { pty } = deps;
+  const { ptyRouter, hermesOAuth } = deps;
 
   ipcMain.handle(
     IpcChannels.AuthStartLoginFlow,
-    async (_event, raw: unknown): Promise<AuthStartLoginFlowResponse> => {
+    async (event, raw: unknown): Promise<AuthStartLoginFlowResponse> => {
       const req: AuthStartLoginFlowRequest = AuthStartLoginFlowRequestSchema.parse(raw ?? {});
 
       const cmd =
@@ -37,13 +45,25 @@ export function registerAuthHandlers(deps: AuthHandlerDeps): void {
           ? getApiKeyLoginCommand(req.apiKey ?? "")
           : getClaudeAiLoginCommand();
 
-      const ptyId = pty.spawn({
-        command: cmd.command,
-        args: cmd.args,
-      });
+      const ptyId = ptyRouter.spawnAndBind(
+        {
+          command: cmd.command,
+          args: cmd.args,
+        },
+        event.sender,
+      );
       // PTY 输出已通过 #20 的 PtyData / PtyExit 事件路由到 renderer
       // (LoginStep 用 TerminalPane + 自己 regex 提取 URL)
       return { ptyId };
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.AuthStartHermesOAuth,
+    async (event, raw: unknown): Promise<HermesOAuthStartResponse> => {
+      const req: HermesOAuthStartRequest = HermesOAuthStartRequestSchema.parse(raw);
+      const response = await hermesOAuth.start(req.profileId, event.sender);
+      return HermesOAuthStartResponseSchema.parse(response);
     },
   );
 

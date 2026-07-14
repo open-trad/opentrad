@@ -28,8 +28,11 @@ const binding: HermesSidecarBinding = {
   taskId: "task-rpc",
   runId: "run-rpc",
   profileId: "profile-rpc",
+  providerSlug: "deepseek",
+  authMode: "api_key",
   model: "openai/gpt-5.2",
   apiMode: "chat_completions",
+  executionBackend: "local",
 };
 
 class FakeSidecarProcess extends EventEmitter implements HermesSidecarProcess {
@@ -795,11 +798,13 @@ function createManager(
   return new HermesSidecarManager({
     binding,
     dataRoot: "/opentrad-data",
+    workspaceRoot: "/workspace/project",
     issueCapability: async () => capabilityLease(endCapabilityPipe),
     launcherPath,
     paths,
     platform: "darwin",
     ensureStateDirs: vi.fn(async () => {}),
+    initializeProfileHome: async () => {},
     verifyInstallation: vi.fn(async () => {}),
     spawn: vi.fn<HermesSidecarSpawn>(() => child),
     terminatorFactory: () => async () => {},

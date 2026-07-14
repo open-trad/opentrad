@@ -39,7 +39,7 @@ GENERATED_RECORD_ROWS = {
 GENERATED_SITE_PACKAGE_ROWS = {
     value for value in GENERATED_RECORD_ROWS if not value.startswith("../../../")
 }
-SUPPORTED_PYTHONS = {(3, 11), (3, 12), (3, 13)}
+EXPECTED_PYTHON = (3, 12, 11)
 MAX_RECORD_BYTES = 128 * 1024
 MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_BYTES = 40 * 1024 * 1024
@@ -398,7 +398,7 @@ def _verify_critical_sources(site_packages, recorded_sizes, budget):
             raise RuntimeError("invalid managed runtime")
 
 def _verify():
-    if sys.version_info[:2] not in SUPPORTED_PYTHONS:
+    if sys.version_info[:3] != EXPECTED_PYTHON:
         raise RuntimeError("invalid managed runtime")
     site_packages, venv_root = _runtime_paths()
     if site_packages.is_symlink() or not site_packages.is_dir():

@@ -17,8 +17,11 @@ const binding: HermesSidecarBinding = {
   taskId: "task-123",
   runId: "run-456",
   profileId: "profile-789",
+  providerSlug: "deepseek",
+  authMode: "api_key",
   model: "openai/gpt-5.2",
   apiMode: "chat_completions",
+  executionBackend: "local",
 };
 
 class FakeSidecarProcess extends EventEmitter implements HermesSidecarProcess {
@@ -357,6 +360,7 @@ function createManager(
   const child = overrides.child ?? new FakeSidecarProcess();
   return new HermesSidecarManager({
     dataRoot: "/opentrad-data",
+    workspaceRoot: "/workspace/project",
     paths,
     platform: "darwin",
     launcherPath,
@@ -368,6 +372,7 @@ function createManager(
       ),
     ),
     ensureStateDirs: vi.fn(async () => {}),
+    initializeProfileHome: async () => {},
     verifyInstallation: vi.fn(async () => {}),
     spawn: vi.fn<HermesSidecarSpawn>(() => child),
     terminatorFactory: () => async () => {},

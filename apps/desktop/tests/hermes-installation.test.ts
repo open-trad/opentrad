@@ -32,7 +32,7 @@ const temporaryRoots: string[] = [];
 function findSupportedPython(): string | undefined {
   const commands = process.env.OPENTRAD_TEST_PYTHON
     ? [process.env.OPENTRAD_TEST_PYTHON]
-    : ["python3.13", "python3.12", "python3.11", "python3"];
+    : ["python3.12", "python3"];
   for (const command of commands) {
     const probe = spawnSync(
       command,
@@ -41,11 +41,11 @@ function findSupportedPython(): string | undefined {
         "-S",
         "-B",
         "-c",
-        "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+        "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')",
       ],
       { encoding: "utf8" },
     );
-    if (probe.status === 0 && ["3.11", "3.12", "3.13"].includes(probe.stdout.trim())) {
+    if (probe.status === 0 && probe.stdout.trim() === "3.12.11") {
       return command;
     }
   }
@@ -97,6 +97,12 @@ describe("verifyHermesInstallation", () => {
     expect(HERMES_INSTALLATION_QUERY).not.toContain("import site");
     expect(HERMES_INSTALLATION_QUERY).not.toContain("sitecustomize");
     expect(HERMES_INSTALLATION_QUERY).not.toContain(".pth");
+  });
+
+  it("rejects every interpreter except the pinned CPython 3.12.11 build", () => {
+    expect(HERMES_INSTALLATION_QUERY).toContain("EXPECTED_PYTHON = (3, 12, 11)");
+    expect(HERMES_INSTALLATION_QUERY).toContain("if sys.version_info[:3] != EXPECTED_PYTHON:");
+    expect(HERMES_INSTALLATION_QUERY).not.toContain("SUPPORTED_PYTHONS");
   });
 
   it("pins and fully verifies the audited wheel RECORD within bounded reads", () => {

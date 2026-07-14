@@ -29,6 +29,8 @@ describe("Hermes gateway request allowlist", () => {
       "session.resume",
       "session.status",
       "approval.respond",
+      "sudo.respond",
+      "secret.respond",
     ]);
     for (const method of HERMES_GATEWAY_REQUEST_METHODS) {
       expect(isHermesGatewayRequestMethod(method)).toBe(true);
@@ -108,7 +110,14 @@ describe("HermesGatewayClient readiness and requests", () => {
     gateway.send(pinnedReadyFrame());
     await client.ready();
 
-    const first = client.request("session.create", {});
+    const createParams = {
+      cwd: "/workspace",
+      source: "opentrad",
+      model: "deepseek-chat",
+      provider: "deepseek",
+      close_on_disconnect: false,
+    } as const;
+    const first = client.request("session.create", createParams);
     const second = client.request("session.status", { session_id: SECOND_LIVE_SESSION_ID });
     await new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -118,7 +127,7 @@ describe("HermesGatewayClient readiness and requests", () => {
         jsonrpc: "2.0",
         id: 1,
         method: "session.create",
-        params: {},
+        params: createParams,
       },
       {
         jsonrpc: "2.0",
@@ -138,14 +147,13 @@ describe("HermesGatewayClient readiness and requests", () => {
             stored_session_id: STORED_SESSION_ID,
             message_count: 0,
             messages: [],
-            persisted: false,
-            resumable: false,
             info: {
+              cwd: "/workspace",
               lazy: true,
-              persisted: false,
-              resumable: false,
-              runtime: "hermes-quarantined",
-              state: "quarantined",
+              model: "deepseek-chat",
+              provider: "deepseek",
+              skills: {},
+              tools: {},
             },
           },
         },

@@ -15,7 +15,8 @@
     "rebuild:electron": "electron-rebuild -f -w better-sqlite3 -w node-pty",
     "rebuild:node": "pnpm rebuild better-sqlite3 node-pty",
     "smoke": "node scripts/smoke-electron-dlopen.cjs",
-    "dist:mac": "electron-vite build && electron-builder --mac"
+    "smoke:packaged": "node scripts/smoke-packaged-electron-dlopen.cjs",
+    "dist:mac": "pnpm run rebuild:electron && electron-vite build && electron-builder --mac --arm64 && pnpm run smoke:packaged"
   },
   "dependencies": {
     "better-sqlite3": "^12.9.0",

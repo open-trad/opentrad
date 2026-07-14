@@ -17,8 +17,11 @@ const binding: HermesSidecarBinding = {
   taskId: "pipe-task",
   runId: "pipe-run",
   profileId: "pipe-profile",
+  providerSlug: "deepseek",
+  authMode: "api_key",
   model: "openai/gpt-5.2",
   apiMode: "chat_completions",
+  executionBackend: "local",
 };
 
 afterEach(async () => {
@@ -43,13 +46,15 @@ describe("HermesSidecarManager real Node pipes", () => {
       const manager = new HermesSidecarManager({
         binding,
         dataRoot,
+        workspaceRoot: dataRoot,
         issueCapability: issueTestCapability,
         launcherPath,
         paths,
         platform: "darwin",
+        initializeProfileHome: async () => {},
         verifyInstallation: vi.fn(async () => {}),
-        spawnSpecFactory: (managedPaths, ownedLauncherPath) =>
-          createHermesGatewaySpawnSpec(managedPaths, ownedLauncherPath),
+        spawnSpecFactory: (managedPaths, ownedLauncherPath, workspaceRoot) =>
+          createHermesGatewaySpawnSpec(managedPaths, ownedLauncherPath, workspaceRoot),
       });
 
       await expect(manager.start()).resolves.toBeUndefined();

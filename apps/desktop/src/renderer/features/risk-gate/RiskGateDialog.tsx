@@ -1,7 +1,8 @@
 // RiskGateDialog(M1 #28 阶段 3):工具级确认弹窗。
 //
-// 4 个按钮(D-M1-6):
+// 5 个按钮(D-M1-6):
 // - 允许一次(allow_once)
+// - 本会话允许(allow_session)
 // - 以后都允许(allow_always)
 // - 拒绝(deny)
 // - 编辑后再发(request_edit) — v1 等价 deny + reason='user_requested_edit'
@@ -12,11 +13,14 @@
 import type { RiskGateConfirmPayload } from "@opentrad/shared";
 import { AlertTriangle } from "lucide-react";
 import type { ReactElement } from "react";
+import { HermesTrustedCodeNotice } from "./HermesTrustedCodeNotice";
 import { paramsToDisplayString } from "./redact";
 
 export interface RiskGateDialogProps {
   payload: RiskGateConfirmPayload;
-  onDecide: (kind: "allow_once" | "allow_always" | "deny" | "request_edit") => void;
+  onDecide: (
+    kind: "allow_once" | "allow_session" | "allow_always" | "deny" | "request_edit",
+  ) => void;
 }
 
 export function RiskGateDialog({ payload, onDecide }: RiskGateDialogProps): ReactElement {
@@ -64,11 +68,16 @@ export function RiskGateDialog({ payload, onDecide }: RiskGateDialogProps): Reac
           <pre style={paramsBlockStyle}>{paramsDisplay}</pre>
         </div>
 
+        <HermesTrustedCodeNotice payload={payload} />
+
         <p style={timeoutHintStyle}>5 分钟内不操作将自动拒绝。</p>
 
         <footer style={buttonRowStyle}>
           <button type="button" onClick={() => onDecide("allow_once")} style={primaryBtn}>
             允许一次
+          </button>
+          <button type="button" onClick={() => onDecide("allow_session")} style={secondaryBtn}>
+            本会话允许
           </button>
           <button type="button" onClick={() => onDecide("allow_always")} style={secondaryBtn}>
             以后都允许

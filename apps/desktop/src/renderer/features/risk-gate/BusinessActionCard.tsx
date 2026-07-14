@@ -5,16 +5,20 @@
 // 主文案描述 businessAction 含义(M1 简化:用 businessAction 字符串当文案;M2 加
 // tool→business mapping 给更人话描述)。
 //
-// 4 个按钮同 RiskGateDialog(D-M1-6):allow_once / allow_always / request_edit / deny。
+// 5 个按钮同 RiskGateDialog(D-M1-6):allow_once / allow_session / allow_always /
+// request_edit / deny。
 
 import type { RiskGateConfirmPayload } from "@opentrad/shared";
 import { ShieldAlert } from "lucide-react";
 import type { ReactElement } from "react";
+import { HermesTrustedCodeNotice } from "./HermesTrustedCodeNotice";
 import { paramsToDisplayString } from "./redact";
 
 export interface BusinessActionCardProps {
   payload: RiskGateConfirmPayload;
-  onDecide: (kind: "allow_once" | "allow_always" | "deny" | "request_edit") => void;
+  onDecide: (
+    kind: "allow_once" | "allow_session" | "allow_always" | "deny" | "request_edit",
+  ) => void;
 }
 
 export function BusinessActionCard({ payload, onDecide }: BusinessActionCardProps): ReactElement {
@@ -45,11 +49,16 @@ export function BusinessActionCard({ payload, onDecide }: BusinessActionCardProp
           <pre style={paramsBlockStyle}>{paramsDisplay}</pre>
         </div>
 
+        <HermesTrustedCodeNotice payload={payload} />
+
         <p style={timeoutHintStyle}>5 分钟内不操作将自动拒绝。</p>
 
         <footer style={buttonRowStyle}>
           <button type="button" onClick={() => onDecide("allow_once")} style={primaryBtn}>
             允许一次
+          </button>
+          <button type="button" onClick={() => onDecide("allow_session")} style={secondaryBtn}>
+            本会话允许
           </button>
           <button type="button" onClick={() => onDecide("allow_always")} style={secondaryBtn}>
             以后都允许

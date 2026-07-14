@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { RiskGateDecisionSchema, RiskGateRequestSchema } from "../src";
+import {
+  RiskGateDecisionSchema,
+  RiskGateRequestSchema,
+  RiskGateResponsePayloadSchema,
+} from "../src";
 
 describe("RiskGateRequest schema", () => {
   it("parses a minimal review-level request", () => {
@@ -35,8 +39,14 @@ describe("RiskGateRequest schema", () => {
 });
 
 describe("RiskGateDecision schema", () => {
-  it("accepts all four decision values", () => {
-    for (const decision of ["allow", "deny", "allow_once", "allow_always"] as const) {
+  it("accepts all five decision values", () => {
+    for (const decision of [
+      "allow",
+      "deny",
+      "allow_once",
+      "allow_session",
+      "allow_always",
+    ] as const) {
       expect(
         RiskGateDecisionSchema.safeParse({
           decision,
@@ -44,6 +54,15 @@ describe("RiskGateDecision schema", () => {
         }).success,
       ).toBe(true);
     }
+  });
+
+  it("accepts allow_session from the renderer response", () => {
+    expect(
+      RiskGateResponsePayloadSchema.parse({
+        requestId: "request-1",
+        kind: "allow_session",
+      }),
+    ).toEqual({ requestId: "request-1", kind: "allow_session" });
   });
 
   it("rejects non-integer timestamp", () => {

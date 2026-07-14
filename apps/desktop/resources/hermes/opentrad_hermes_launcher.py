@@ -1,174 +1,157 @@
 #!/usr/bin/env python3
-"""OpenTrad-owned, fail-closed launcher for the pinned Hermes quarantine.
+"""OpenTrad's stdlib-only bootstrap for the pinned native Hermes gateway.
 
-This module establishes the boundary that must exist before any third-party
-module is loaded: private paths, a scrubbed environment, a bounded FD
-capability, no core dumps, an explicitly inferred site-packages directory, and
-an audit policy primitive.  It then hash-pins and directly compiles the sibling
-OpenTrad runtime before that runtime imports the verified Hermes distribution.
-
-The eventual production invocation is deliberately narrow::
+Production invocation is intentionally narrow::
 
     python -I -S -B -u -X utf8 /absolute/opentrad_hermes_launcher.py
 
-Only Python's standard library may be imported above the Hermes boundary.
+The bootstrap consumes one Profile capability from FD3, validates the managed
+runtime, scrubs inherited process state, and then calls the unmodified upstream
+``tui_gateway.entry.main``. Hermes owns the JSON-RPC server and native tools.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import faulthandler
+import functools
 import hashlib
+import importlib
+import importlib.metadata
+import ipaddress
 import json
-import math
 import os
 from pathlib import Path
 import re
 import resource
 import selectors
-import socket
 import stat
 import sys
-import threading
 import time
-import types
-from typing import BinaryIO, Callable, MutableMapping, NoReturn, Protocol
+from typing import Callable, MutableMapping, NoReturn
+from urllib.parse import urlsplit
 
 
-CAPABILITY_FD = 3
-CAPABILITY_MAX_BYTES = 4096
-CAPABILITY_READ_TIMEOUT_SECONDS = 1.0
-CAPABILITY_MAX_LIFETIME_SECONDS = 300
-CAPABILITY_FIELDS = frozenset(
-    {"v", "expiresAt", "token", "model", "apiMode", "brokerPort"}
-)
-ALLOWED_API_MODES = frozenset({"chat_completions", "codex_responses"})
-MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
-TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,512}$")
+BOOTSTRAP_FD = 3
+BOOTSTRAP_MAX_BYTES = 4096
+BOOTSTRAP_READ_TIMEOUT_SECONDS = 2.0
+PINNED_PYTHON = (3, 12, 11)
+PINNED_HERMES_VERSION = "0.18.2"
+PINNED_HERMES_RELEASE = "2026.7.7.2"
 GENERIC_REFUSAL = "OpenTrad Hermes launcher refused startup"
-GENERIC_STDERR = b"OpenTrad Hermes launcher refused startup\n"
+GENERIC_STDERR = GENERIC_REFUSAL + "\n"
 EX_CONFIG = 78
-MAX_NDJSON_FRAME_BYTES = 4 * 1024 * 1024
-MAX_RPC_ID_STRING_CHARACTERS = 128
-MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
-MAX_JSON_INTEGER_DIGITS = 64
-MAX_JSON_NESTING_DEPTH = 128
-MAX_PROMPT_CHARACTERS = 262_144
-MAX_PROMPT_UTF8_BYTES = 1024 * 1024
-OWNED_RUNTIME_FILENAME = "opentrad_hermes_runtime.py"
-OWNED_RUNTIME_MODULE_NAME = "_opentrad_owned_hermes_runtime_v1"
-OWNED_RUNTIME_MAX_BYTES = 512 * 1024
-OWNED_RUNTIME_SHA256 = (
-    "a99967df486337f9e56d18e2dfc3a3cae9b70abdff20d532c1613ab856515c49"
-)
-STORED_SESSION_ID_PATTERN = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{6}$", re.ASCII)
-LIVE_SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{8}$")
-ALLOWED_RPC_METHODS = frozenset(
-    {
-        "session.create",
-        "session.resume",
-        "session.status",
-        "session.close",
-        "session.interrupt",
-        "prompt.submit",
-        "approval.respond",
-    }
-)
-READY_ENVELOPE = {
-    "jsonrpc": "2.0",
-    "method": "event",
-    "params": {"type": "gateway.ready", "payload": {"skin": {}}},
-}
-_RPC_ERROR_MESSAGES = {
-    -32700: "Parse error",
-    -32600: "Invalid Request",
-    -32601: "Method not found",
-    -32602: "Invalid params",
-    -32603: "Internal error",
-}
-_UNKNOWN_RPC_ERROR_MESSAGE = "Server error"
 
-_SAFE_MODE_ENVIRONMENT = {
-    "HERMES_SAFE_MODE": "1",
-    "HERMES_IGNORE_USER_CONFIG": "1",
-    "HERMES_IGNORE_RULES": "1",
-}
-_INHERITED_ENVIRONMENT_ALLOWLIST = frozenset({"LANG", "LC_ALL", "LC_CTYPE"})
-_PROCESS_AUDIT_EVENTS = frozenset(
+_PAYLOAD_FIELDS = frozenset(
     {
-        "subprocess.Popen",
-        "os.system",
-        "os.posix_spawn",
-        "os.posix_spawnp",
-        "pty.spawn",
-        "ctypes.dlopen",
+        "v",
+        "profileId",
+        "providerSlug",
+        "authMode",
+        "apiMode",
+        "executionBackend",
+        "model",
+        "apiKey",
+        "baseUrl",
     }
 )
-_CONTROL_AUDIT_EVENTS = frozenset(
+_AUTH_MODES = frozenset({"api_key", "oauth"})
+_API_MODES = frozenset({"chat_completions", "codex_responses"})
+_EXECUTION_BACKENDS = frozenset({"local", "docker"})
+_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", re.ASCII)
+_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
+_ENVIRONMENT_ALLOWLIST = frozenset(
     {
-        "os.chmod",
-        "os.chown",
-        "os.fchmod",
-        "os.fchown",
-        "os.putenv",
-        "os.unsetenv",
-        "os.fork",
-        "os.forkpty",
-        "os.kill",
-        "os.killpg",
+        "HOME",
+        "PATH",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "COLORTERM",
+        "SSH_AUTH_SOCK",
     }
 )
-_SUBINTERPRETER_AUDIT_EVENT = "cpython.PyInterpreterState_New"
-_PATH_MUTATION_EVENT_INDICES: dict[str, tuple[int, ...]] = {
-    "os.remove": (0,),
-    "os.unlink": (0,),
-    "os.rmdir": (0,),
-    "os.mkdir": (0,),
-    "os.rename": (0, 1),
-    "os.replace": (0, 1),
-    "os.utime": (0,),
-    "os.link": (0, 1),
-    "os.symlink": (1,),
-    "os.truncate": (0,),
-    "os.setxattr": (0,),
-    "os.removexattr": (0,),
-    "os.mknod": (0,),
-    "os.mkfifo": (0,),
+_PROVIDER_ENVIRONMENT = {
+    "openai-api": ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"),
+    "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"),
 }
-_FD_MUTATION_AUDIT_EVENTS = frozenset({"os.ftruncate"})
+_WORKSPACE_INPUT_ENV = "OPENTRAD_WORKSPACE_ROOT"
+_BUNDLED_SKILLS_INPUT_ENV = "HERMES_BUNDLED_SKILLS"
+_NETWORK_INPUT_ENVIRONMENT = {
+    "OPENTRAD_NETWORK_HTTP_PROXY": "HTTP_PROXY",
+    "OPENTRAD_NETWORK_HTTPS_PROXY": "HTTPS_PROXY",
+}
+_NETWORK_NO_PROXY_INPUT_ENV = "OPENTRAD_NETWORK_NO_PROXY"
+_NETWORK_NO_PROXY_VALUE = "localhost,127.0.0.1,::1"
+_PROXY_URL_PATTERN = re.compile(
+    r"^http://(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+):([0-9]{1,5})$",
+    re.ASCII,
+)
+_PROXY_HOST_LABEL_PATTERN = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$",
+    re.ASCII,
+)
+_COMMON_EXECUTION_ENVIRONMENT = {
+    "TERMINAL_CONTAINER_PERSISTENT": "false",
+    "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES": "false",
+    "TERMINAL_DOCKER_VOLUMES": "[]",
+    "TERMINAL_DOCKER_EXTRA_ARGS": "[]",
+    "TERMINAL_DOCKER_FORWARD_ENV": "[]",
+    "TERMINAL_DOCKER_ENV": "{}",
+}
+_DOCKER_EXECUTION_ENVIRONMENT = {
+    "TERMINAL_ENV": "docker",
+    "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE": "true",
+    "TERMINAL_DOCKER_RUN_AS_HOST_USER": "true",
+}
+_DOTENV_CONTROL_ENVIRONMENT = frozenset(
+    """BASH_ENV BASHOPTS CDPATH ENV GLOBIGNORE IFS SHELL SHELLOPTS ZDOTDIR
+    COPILOT_API_BASE_URL DOCKER_CERT_PATH DOCKER_CONFIG DOCKER_CONTEXT DOCKER_HOST DOCKER_TLS_VERIFY
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_ALLOW_PROTOCOL GIT_ASKPASS GIT_CEILING_DIRECTORIES
+    GIT_DIR GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+    GIT_PROTOCOL_FROM_USER GIT_PROXY_COMMAND GIT_SSH GIT_SSH_COMMAND GIT_WORK_TREE
+    HERMES_ACCEPT_HOOKS HERMES_BUNDLED_SKILLS HERMES_CA_BUNDLE HERMES_CODEX_BASE_URL
+    HERMES_CONFIG HERMES_CONTAINER HERMES_DEV HERMES_ENV HERMES_EPHEMERAL_SYSTEM_PROMPT
+    HERMES_HOME HERMES_MANAGED HERMES_MAX_ITERATIONS HERMES_MEDIA_ALLOW_DIRS
+    HERMES_MEDIA_TRUST_RECENT_FILES HERMES_PORTAL_BASE_URL HERMES_PREFILL_MESSAGES_FILE
+    HERMES_PROFILE HERMES_QWEN_BASE_URL HERMES_RESOURCE_PATH
+    HERMES_SHARED_AUTH_DIR HERMES_SKILL_DIR HERMES_TUI_NO_CONFIRM HERMES_XAI_BASE_URL
+    HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+    SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE NODE_EXTRA_CA_CERTS
+    OPENSSL_CONF SSLKEYLOGFILE
+    NODE_OPTIONS NODE_PATH NOUS_INFERENCE_BASE_URL NOUS_PORTAL_BASE_URL
+    PYTHONBREAKPOINT PYTHONEXECUTABLE PYTHONHOME PYTHONINSPECT
+    PYTHONNOUSERSITE PYTHONPATH PYTHONSAFEPATH PYTHONSTARTUP PYTHONUSERBASE SSH_ASKPASS""".split()
+)
+_DOTENV_CONTROL_PREFIXES = (
+    "DYLD_", "GIT_CONFIG_", "LD_", "OPENTRAD_", "TERMINAL_",
+)
 
 
 class LauncherRefusal(RuntimeError):
-    """A deliberately non-reflective failure at the launcher boundary."""
+    """A fixed, non-reflective failure at the trusted bootstrap boundary."""
 
-    def __init__(self, code: str = "startup_refused") -> None:
+    def __init__(self) -> None:
         super().__init__(GENERIC_REFUSAL)
-        self.code = code
 
 
-class _DuplicateCapabilityKey(ValueError):
+class _DuplicateKey(ValueError):
     pass
 
 
 @dataclass(frozen=True, slots=True)
-class Capability:
-    expires_at: int
-    token: str = field(repr=False)
-    model: str
+class BootstrapPayload:
+    profile_id: str
+    provider_slug: str
+    auth_mode: str
     api_mode: str
-    broker_port: int
-
-    @property
-    def broker_url(self) -> str:
-        """Return the only network endpoint represented by the capability."""
-
-        return f"http://127.0.0.1:{self.broker_port}/v1"
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeDirectories:
-    home: Path
-    tmp: Path
+    execution_backend: str
+    model: str
+    api_key: str | None = field(repr=False)
+    base_url: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,692 +164,226 @@ class BootstrapPaths:
 @dataclass(frozen=True, slots=True)
 class BootstrapState:
     paths: BootstrapPaths
-    directories: RuntimeDirectories
-    capability: Capability = field(repr=False)
+    payload: BootstrapPayload = field(repr=False)
     site_packages: Path
-    audit_policy: "AuditPolicy"
+    workspace_root: Path
+    bundled_skills_root: Path
 
 
-@dataclass(frozen=True, slots=True)
-class RpcRequest:
-    request_id: int | str
-    method: str
-    params: object
-
-
-@dataclass(frozen=True, slots=True)
-class RpcPolicyContext:
-    """Trusted immutable values injected into the pinned gateway contract."""
-
-    cwd: Path
-
-    def __post_init__(self) -> None:
-        try:
-            cwd = self.cwd
-            if not isinstance(cwd, Path):
-                _reject("rpc_policy_cwd")
-            canonical = Path(os.path.normpath(os.fspath(cwd)))
-            if (
-                not cwd.is_absolute()
-                or cwd != canonical
-                or not _is_strict_utf8(str(cwd))
-            ):
-                _reject("rpc_policy_cwd")
-        except LauncherRefusal:
-            raise
-        except (OSError, RuntimeError, TypeError, ValueError):
-            _reject("rpc_policy_cwd")
-
-
-class SafeJsonTransport:
-    """Thread-safe bounded NDJSON output that never renders the capability token."""
-
-    __slots__ = ("_stream", "_token", "_write_lock", "_closed")
-
-    def __init__(self, stream: BinaryIO, capability: Capability) -> None:
-        self._stream = stream
-        self._token = capability.token
-        self._write_lock = threading.Lock()
-        self._closed = False
-
-    @classmethod
-    def capture_stdout(cls, capability: Capability) -> "SafeJsonTransport":
-        stream = getattr(sys.stdout, "buffer", None)
-        if stream is None or not callable(getattr(stream, "write", None)):
-            _reject("stdout_transport")
-        return cls(stream, capability)
-
-    def __repr__(self) -> str:
-        return f"SafeJsonTransport(max_frame_bytes={MAX_NDJSON_FRAME_BYTES})"
-
-    def write(self, payload: object) -> bool:
-        return self.write_frame(payload)
-
-    def close(self) -> None:
-        with self._write_lock:
-            if self._closed:
-                return
-            self._closed = True
-            try:
-                self._stream.flush()
-            except BaseException:
-                pass
-
-    def write_frame(self, payload: object) -> bool:
-        try:
-            safe_payload = _prepare_json_output(payload, self._token)
-            encoded = json.dumps(
-                safe_payload,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8", errors="strict")
-            wire = encoded + b"\n"
-            if len(wire) > MAX_NDJSON_FRAME_BYTES:
-                return False
-        except BaseException:
-            return False
-
-        with self._write_lock:
-            if self._closed:
-                return False
-            try:
-                remaining = memoryview(wire)
-                while remaining:
-                    written = self._stream.write(remaining)
-                    if (
-                        type(written) is not int
-                        or written <= 0
-                        or written > len(remaining)
-                    ):
-                        return False
-                    remaining = remaining[written:]
-                self._stream.flush()
-                return True
-            except BaseException:
-                return False
-
-
-RpcResponse = dict[str, object] | None
-RpcDispatcher = Callable[[dict[str, object]], RpcResponse]
-
-
-class ServerDispatch(Protocol):
-    """Pinned gateway shape; its optional transport must never fall back to stdio."""
-
-    def dispatch(
-        self,
-        request: dict[str, object],
-        transport: SafeJsonTransport,
-        /,
-    ) -> RpcResponse: ...
-
-
-def bind_server_dispatch(
-    server: ServerDispatch,
-    transport: SafeJsonTransport,
-) -> RpcDispatcher:
-    """Bind the safe transport explicitly instead of passing ``server.dispatch`` raw."""
-
-    def dispatch_with_safe_transport(request: dict[str, object]) -> RpcResponse:
-        return server.dispatch(request, transport)
-
-    return dispatch_with_safe_transport
-
-
-def _prepare_json_output(payload: object, token: str) -> object:
-    sanitized = _redact_json_value(payload, token, set())
-    if (
-        isinstance(sanitized, dict)
-        and sanitized.get("jsonrpc") == "2.0"
-        and "error" in sanitized
-    ):
-        error = sanitized.get("error")
-        code, message = _normalize_rpc_error(
-            error.get("code") if isinstance(error, dict) else None
-        )
-        normalized = dict(sanitized)
-        normalized["error"] = {"code": code, "message": message}
-        return normalized
-    return sanitized
-
-
-def _normalize_rpc_error(code: object) -> tuple[int, str]:
-    if (
-        type(code) is not int
-        or not -MAX_SAFE_JSON_INTEGER <= code <= MAX_SAFE_JSON_INTEGER
-    ):
-        code = -32603
-    return code, _RPC_ERROR_MESSAGES.get(code, _UNKNOWN_RPC_ERROR_MESSAGE)
-
-
-def _redact_json_value(value: object, token: str, active: set[int]) -> object:
-    if isinstance(value, str):
-        return value.replace(token, "<redacted>")
-    if value is None or type(value) in {bool, int, float}:
-        return value
-    if isinstance(value, dict):
-        identity = id(value)
-        if identity in active:
-            raise ValueError("cyclic JSON value")
-        active.add(identity)
-        try:
-            return {
-                (
-                    key.replace(token, "<redacted>") if isinstance(key, str) else key
-                ): _redact_json_value(
-                    item,
-                    token,
-                    active,
-                )
-                for key, item in value.items()
-            }
-        finally:
-            active.remove(identity)
-    if isinstance(value, (list, tuple)):
-        identity = id(value)
-        if identity in active:
-            raise ValueError("cyclic JSON value")
-        active.add(identity)
-        try:
-            return [_redact_json_value(item, token, active) for item in value]
-        finally:
-            active.remove(identity)
-    return value
-
-
-def _reject(code: str) -> NoReturn:
-    raise LauncherRefusal(code)
-
-
-def _terminate_for_unsafe_audit_event() -> NoReturn:
-    """Avoid CPython 3.12's crash when subinterpreter creation hooks raise."""
-
-    try:
-        os.write(2, GENERIC_STDERR)
-    finally:
-        os._exit(EX_CONFIG)
+def _refuse() -> NoReturn:
+    raise LauncherRefusal()
 
 
 def _pairs_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
-            raise _DuplicateCapabilityKey()
+            raise _DuplicateKey()
         result[key] = value
     return result
 
 
-class _RpcFrameError(ValueError):
-    __slots__ = ("code",)
-
-    def __init__(self, code: int) -> None:
-        super().__init__(_RPC_ERROR_MESSAGES[code])
-        self.code = code
-
-
-class _InvalidJsonValue(ValueError):
-    pass
-
-
-class _InvalidRpcParams(ValueError):
-    pass
-
-
-def _reject_json_constant(_value: str) -> NoReturn:
-    raise _InvalidJsonValue()
-
-
-def _parse_json_integer(value: str) -> int:
-    digits = value[1:] if value.startswith("-") else value
-    if len(digits) > MAX_JSON_INTEGER_DIGITS:
-        raise _InvalidJsonValue()
+def _valid_base_url(value: object) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str or not value or len(value) > 2048:
+        _refuse()
     try:
-        parsed = int(value)
-    except (ValueError, OverflowError):
-        raise _InvalidJsonValue() from None
-    return parsed
-
-
-def _parse_json_float(value: str) -> float:
-    try:
-        parsed = float(value)
-    except (ValueError, OverflowError):
-        raise _InvalidJsonValue() from None
-    if not math.isfinite(parsed):
-        raise _InvalidJsonValue()
-    return parsed
-
-
-def parse_rpc_request(frame: bytes) -> RpcRequest:
-    """Parse one bounded frame into a normalized request without reflecting input."""
-
-    try:
-        text = frame.decode("utf-8", errors="strict")
-        payload = json.loads(
-            text,
-            object_pairs_hook=_pairs_without_duplicates,
-            parse_constant=_reject_json_constant,
-            parse_int=_parse_json_integer,
-            parse_float=_parse_json_float,
-        )
-    except (UnicodeDecodeError, ValueError, OverflowError, RecursionError):
-        raise _RpcFrameError(-32700) from None
-
-    if not isinstance(payload, dict) or set(payload) != {
-        "jsonrpc",
-        "id",
-        "method",
-        "params",
-    }:
-        raise _RpcFrameError(-32600)
-    request_id = payload["id"]
-    method = payload["method"]
-    params = payload["params"]
-    if payload["jsonrpc"] != "2.0" or not _is_valid_rpc_id(request_id):
-        raise _RpcFrameError(-32600)
-    if not isinstance(method, str) or len(method) == 0 or not _is_strict_utf8(method):
-        raise _RpcFrameError(-32600)
-    try:
-        normalized_params = _copy_json_value(params, 0)
-    except (ValueError, RecursionError):
-        raise _RpcFrameError(-32700) from None
-    return RpcRequest(
-        request_id=request_id,
-        method=method,
-        params=normalized_params,
-    )
-
-
-def _is_valid_rpc_id(value: object) -> bool:
-    if type(value) is int:
-        return -MAX_SAFE_JSON_INTEGER <= value <= MAX_SAFE_JSON_INTEGER
-    return (
-        type(value) is str
-        and len(value) <= MAX_RPC_ID_STRING_CHARACTERS
-        and _is_strict_utf8(value)
-    )
-
-
-def _is_strict_utf8(value: str) -> bool:
-    try:
-        value.encode("utf-8", errors="strict")
-        return True
-    except UnicodeEncodeError:
-        return False
-
-
-def _copy_json_object(
-    value: dict[str, object],
-    depth: int = 0,
-) -> dict[str, object]:
-    if depth > MAX_JSON_NESTING_DEPTH:
-        raise _InvalidJsonValue()
-    copied: dict[str, object] = {}
-    for key, item in value.items():
-        if not isinstance(key, str):
-            raise _InvalidJsonValue()
-        copied[key] = _copy_json_value(item, depth + 1)
-    return copied
-
-
-def _copy_json_value(value: object, depth: int) -> object:
-    if value is None or type(value) is bool:
-        return value
-    if isinstance(value, str):
-        return value
-    if type(value) is int:
-        if not -MAX_SAFE_JSON_INTEGER <= value <= MAX_SAFE_JSON_INTEGER:
-            raise _InvalidJsonValue()
-        return value
-    if type(value) is float:
-        if not math.isfinite(value) or (
-            value.is_integer() and abs(value) > MAX_SAFE_JSON_INTEGER
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
         ):
-            raise _InvalidJsonValue()
-        return value
-    if isinstance(value, dict):
-        return _copy_json_object(value, depth)
-    if isinstance(value, list):
-        if depth > MAX_JSON_NESTING_DEPTH:
-            raise _InvalidJsonValue()
-        return [_copy_json_value(item, depth + 1) for item in value]
-    raise _InvalidJsonValue()
-
-
-def _rpc_error_response(
-    code: int, request_id: int | str | None = None
-) -> dict[str, object]:
-    normalized_code, message = _normalize_rpc_error(code)
-    return {
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "error": {
-            "code": normalized_code,
-            "message": message,
-        },
-    }
-
-
-def _require_exact_rpc_keys(
-    params: object,
-    expected: frozenset[str],
-) -> None:
-    if type(params) is not dict or set(params) != expected:
-        raise _InvalidRpcParams()
-
-
-def _require_session_id(value: object, pattern: re.Pattern[str]) -> str:
-    if type(value) is not str or pattern.fullmatch(value) is None:
-        raise _InvalidRpcParams()
+            _refuse()
+        _ = parsed.port
+        if parsed.scheme == "http":
+            hostname = parsed.hostname.casefold()
+            loopback = hostname == "localhost"
+            if not loopback:
+                try:
+                    loopback = ipaddress.ip_address(hostname).is_loopback
+                except ValueError:
+                    loopback = False
+            if not loopback:
+                _refuse()
+    except LauncherRefusal:
+        raise
+    except (TypeError, ValueError):
+        _refuse()
     return value
 
 
-def _normalize_rpc_params(
-    method: str,
-    params: object,
-    policy_context: RpcPolicyContext,
-) -> dict[str, object]:
-    if type(policy_context) is not RpcPolicyContext:
-        raise _InvalidRpcParams()
+def parse_bootstrap_payload(raw: bytes) -> BootstrapPayload:
+    """Parse the exact FD3 schema without reflecting rejected values."""
 
-    if method == "session.create":
-        _require_exact_rpc_keys(params, frozenset())
-        return {
-            "cwd": str(policy_context.cwd),
-            "source": "opentrad",
-            "close_on_disconnect": True,
-        }
-
-    if method == "session.resume":
-        _require_exact_rpc_keys(params, frozenset({"session_id"}))
-        return {
-            "session_id": _require_session_id(
-                params["session_id"],
-                STORED_SESSION_ID_PATTERN,
-            )
-        }
-
-    if method in {"session.status", "session.close", "session.interrupt"}:
-        _require_exact_rpc_keys(params, frozenset({"session_id"}))
-        return {
-            "session_id": _require_session_id(
-                params["session_id"],
-                LIVE_SESSION_ID_PATTERN,
-            )
-        }
-
-    if method == "prompt.submit":
-        _require_exact_rpc_keys(params, frozenset({"session_id", "text"}))
-        session_id = _require_session_id(
-            params["session_id"],
-            LIVE_SESSION_ID_PATTERN,
+    if type(raw) is not bytes or not raw or len(raw) > BOOTSTRAP_MAX_BYTES:
+        _refuse()
+    try:
+        decoded = raw.decode("utf-8", errors="strict")
+        value = json.loads(
+            decoded,
+            object_pairs_hook=_pairs_without_duplicates,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
         )
-        text = params["text"]
-        if type(text) is not str or len(text) > MAX_PROMPT_CHARACTERS:
-            raise _InvalidRpcParams()
-        try:
-            encoded_text = text.encode("utf-8", errors="strict")
-        except UnicodeEncodeError:
-            raise _InvalidRpcParams() from None
-        if not text.strip() or len(encoded_text) > MAX_PROMPT_UTF8_BYTES:
-            raise _InvalidRpcParams()
-        return {"session_id": session_id, "text": text}
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        _refuse()
+    if type(value) is not dict or frozenset(value) != _PAYLOAD_FIELDS:
+        _refuse()
+    if type(value["v"]) is not int or value["v"] != 1:
+        _refuse()
 
-    if method == "approval.respond":
-        _require_exact_rpc_keys(params, frozenset({"session_id", "choice"}))
-        session_id = _require_session_id(
-            params["session_id"],
-            LIVE_SESSION_ID_PATTERN,
-        )
-        choice = params["choice"]
-        if type(choice) is not str or choice not in {"once", "deny"}:
-            raise _InvalidRpcParams()
-        return {"session_id": session_id, "choice": choice, "all": False}
-
-    raise _InvalidRpcParams()
-
-
-def dispatch_rpc_request(
-    request: RpcRequest,
-    dispatcher: RpcDispatcher,
-    policy_context: RpcPolicyContext,
-) -> dict[str, object] | None:
-    """Apply the method and parameter policy before calling the gateway."""
-
-    if type(request) is not RpcRequest:
-        return _rpc_error_response(-32600)
-    request_id = request.request_id
-    method = request.method
-    params = request.params
+    profile_id = value["profileId"]
+    provider_slug = value["providerSlug"]
+    model = value["model"]
     if (
-        not _is_valid_rpc_id(request_id)
-        or type(method) is not str
-        or not _is_strict_utf8(method)
+        type(profile_id) is not str
+        or _IDENTIFIER_PATTERN.fullmatch(profile_id) is None
+        or type(provider_slug) is not str
+        or _IDENTIFIER_PATTERN.fullmatch(provider_slug) is None
+        or type(model) is not str
+        or _MODEL_PATTERN.fullmatch(model) is None
     ):
-        return _rpc_error_response(-32600)
-    if method not in ALLOWED_RPC_METHODS:
-        return _rpc_error_response(-32601, request_id)
-    try:
-        normalized_params = _normalize_rpc_params(
-            method,
-            params,
-            policy_context,
-        )
-    except BaseException:
-        return _rpc_error_response(-32602, request_id)
-    try:
-        normalized_request: dict[str, object] = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-            "params": normalized_params,
-        }
-        response = dispatcher(normalized_request)
-    except BaseException:
-        return _rpc_error_response(-32603, request_id)
-    if response is None:
-        return None
-    if not isinstance(response, dict):
-        return _rpc_error_response(-32603, request_id)
-    return response
-
-
-def run_ndjson_loop(
-    input_stream: BinaryIO,
-    transport: SafeJsonTransport,
-    dispatcher: RpcDispatcher,
-    shutdown: Callable[[], object],
-    policy_context: RpcPolicyContext,
-) -> bool:
-    """Run the owned loop and close output after shutdown on every exit.
-
-    ``dispatcher`` must already be unary and transport-bound.  Native gateway
-    dispatchers require :func:`bind_server_dispatch`; the owned quarantine
-    returns an equivalent guarded unary dispatcher directly.  Passing the
-    pinned gateway's raw ``server.dispatch`` would select its unsafe default
-    stdio transport for asynchronous responses and events.
-    """
-
-    try:
-        if not transport.write_frame(READY_ENVELOPE):
-            return False
-        while True:
-            try:
-                frame = input_stream.readline(MAX_NDJSON_FRAME_BYTES + 1)
-            except BaseException:
-                return False
-            if not isinstance(frame, bytes):
-                return False
-            if frame == b"":
-                return True
-            if len(frame) > MAX_NDJSON_FRAME_BYTES:
-                transport.write_frame(_rpc_error_response(-32600))
-                return False
-            if frame.strip() == b"":
-                continue
-            try:
-                request = parse_rpc_request(frame)
-            except _RpcFrameError as error:
-                if not transport.write_frame(_rpc_error_response(error.code)):
-                    return False
-                continue
-            if request.method not in ALLOWED_RPC_METHODS:
-                response = _rpc_error_response(-32601, request.request_id)
-            else:
-                response = dispatch_rpc_request(request, dispatcher, policy_context)
-            if response is not None and not transport.write_frame(response):
-                return False
-    finally:
-        try:
-            shutdown()
-        except BaseException:
-            pass
-        try:
-            transport.close()
-        except BaseException:
-            pass
-
-
-def parse_capability(raw: bytes, *, now: int | None = None) -> Capability:
-    """Parse the closed FD3 capability schema without reflecting input in errors."""
-
-    if not isinstance(raw, bytes) or len(raw) == 0 or len(raw) > CAPABILITY_MAX_BYTES:
-        _reject("capability_size")
-    try:
-        text = raw.decode("utf-8", errors="strict")
-        payload = json.loads(text, object_pairs_hook=_pairs_without_duplicates)
-    except (
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        _DuplicateCapabilityKey,
-        RecursionError,
-    ):
-        _reject("capability_encoding")
-
-    if not isinstance(payload, dict) or set(payload) != CAPABILITY_FIELDS:
-        _reject("capability_schema")
-
-    current_time = int(time.time()) if now is None else now
-    version = payload["v"]
-    expires_at = payload["expiresAt"]
-    token = payload["token"]
-    model = payload["model"]
-    api_mode = payload["apiMode"]
-    broker_port = payload["brokerPort"]
-
-    if type(current_time) is not int:
-        _reject("clock_invalid")
-    if type(version) is not int or version != 1:
-        _reject("capability_version")
-    if type(expires_at) is not int:
-        _reject("capability_expiry")
+        _refuse()
+    auth_mode = value["authMode"]
+    api_mode = value["apiMode"]
+    execution_backend = value["executionBackend"]
     if (
-        expires_at <= current_time
-        or expires_at > current_time + CAPABILITY_MAX_LIFETIME_SECONDS
+        type(auth_mode) is not str
+        or auth_mode not in _AUTH_MODES
+        or type(api_mode) is not str
+        or api_mode not in _API_MODES
+        or type(execution_backend) is not str
+        or execution_backend not in _EXECUTION_BACKENDS
     ):
-        _reject("capability_expiry")
-    if not _valid_token(token):
-        _reject("capability_token")
-    if not isinstance(model, str) or MODEL_PATTERN.fullmatch(model) is None:
-        _reject("capability_model")
-    if not isinstance(api_mode, str) or api_mode not in ALLOWED_API_MODES:
-        _reject("capability_api_mode")
-    if type(broker_port) is not int or not 1 <= broker_port <= 65535:
-        _reject("capability_port")
+        _refuse()
 
-    return Capability(
-        expires_at=expires_at,
-        token=token,
-        model=model,
+    api_key = value["apiKey"]
+    base_url = _valid_base_url(value["baseUrl"])
+    if auth_mode == "api_key":
+        if (
+            type(api_key) is not str
+            or not api_key
+            or api_key.strip() != api_key
+            or any(ord(character) < 0x21 or ord(character) > 0x7E for character in api_key)
+            or len(api_key) > 2048
+        ):
+            _refuse()
+        if provider_slug not in _PROVIDER_ENVIRONMENT and not provider_slug.startswith(
+            "custom:"
+        ):
+            _refuse()
+    elif api_key is not None or base_url is not None:
+        _refuse()
+
+    return BootstrapPayload(
+        profile_id=profile_id,
+        provider_slug=provider_slug,
+        auth_mode=auth_mode,
         api_mode=api_mode,
-        broker_port=broker_port,
+        execution_backend=execution_backend,
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
     )
 
 
-def _valid_token(value: object) -> bool:
-    return isinstance(value, str) and TOKEN_PATTERN.fullmatch(value) is not None
-
-
-def read_capability_fd(
-    fd: int = CAPABILITY_FD,
+def read_bootstrap_fd(
+    fd: int = BOOTSTRAP_FD,
     *,
-    timeout_seconds: float = CAPABILITY_READ_TIMEOUT_SECONDS,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> Capability:
-    """Claim, bound, read-to-EOF, and close the inherited capability pipe."""
+    timeout_seconds: float = BOOTSTRAP_READ_TIMEOUT_SECONDS,
+) -> BootstrapPayload:
+    """Read one bounded payload through EOF, then always close the descriptor."""
 
-    selector: selectors.BaseSelector | None = None
-    buffer = bytearray()
+    selector = selectors.DefaultSelector()
     try:
-        if type(fd) is not int or fd < 0:
-            _reject("capability_fd")
+        if type(fd) is not int or fd < 0 or timeout_seconds <= 0:
+            _refuse()
         os.set_inheritable(fd, False)
-        os.set_blocking(fd, False)
-        selector = selectors.DefaultSelector()
         selector.register(fd, selectors.EVENT_READ)
-        bounded_timeout = min(
-            max(float(timeout_seconds), 0.001), CAPABILITY_READ_TIMEOUT_SECONDS
-        )
-        deadline = monotonic() + bounded_timeout
-
+        deadline = time.monotonic() + timeout_seconds
+        chunks = bytearray()
         while True:
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                _reject("capability_eof")
-            if not selector.select(remaining):
-                _reject("capability_eof")
-            chunk = os.read(fd, CAPABILITY_MAX_BYTES + 1 - len(buffer))
-            if chunk == b"":
-                break
-            buffer.extend(chunk)
-            if len(buffer) > CAPABILITY_MAX_BYTES:
-                _reject("capability_size")
-
-        return parse_capability(bytes(buffer))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                _refuse()
+            chunk = os.read(fd, min(1024, BOOTSTRAP_MAX_BYTES + 1 - len(chunks)))
+            if not chunk:
+                return parse_bootstrap_payload(bytes(chunks))
+            chunks.extend(chunk)
+            if len(chunks) > BOOTSTRAP_MAX_BYTES:
+                _refuse()
     except LauncherRefusal:
         raise
-    except (OSError, OverflowError, TypeError, ValueError):
-        _reject("capability_fd")
+    except (OSError, TypeError, ValueError):
+        _refuse()
     finally:
-        if selector is not None:
-            selector.close()
+        selector.close()
         try:
             os.close(fd)
-        except (OSError, TypeError):
+        except OSError:
             pass
 
 
 def _canonical_existing_path(value: os.PathLike[str] | str, *, directory: bool) -> Path:
     try:
-        raw = Path(value)
-        if not raw.is_absolute():
-            _reject("path_not_absolute")
-        lexical = Path(os.path.normpath(os.fspath(raw)))
-        resolved = raw.resolve(strict=True)
-        if lexical != resolved:
-            _reject("path_not_canonical")
-        metadata = raw.lstat()
+        path = Path(value)
+        lexical = Path(os.path.normpath(os.fspath(path)))
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+        expected_type = stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode)
+        if not path.is_absolute() or lexical != path or resolved != path or not expected_type:
+            _refuse()
+        if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+            _refuse()
+        return path
     except LauncherRefusal:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
-        _reject("path_invalid")
-
-    if directory:
-        if not stat.S_ISDIR(metadata.st_mode):
-            _reject("path_not_directory")
-    elif not stat.S_ISREG(metadata.st_mode):
-        _reject("path_not_file")
-    if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
-        _reject("path_owner")
-    return resolved
+        _refuse()
 
 
 def _validate_private_directory(path: Path) -> None:
     metadata = path.lstat()
-    mode = stat.S_IMODE(metadata.st_mode)
-    if mode & 0o077 or mode & 0o700 != 0o700:
-        _reject("path_permissions")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        _refuse()
+
+
+def _profile_config_environment(hermes_home: object) -> dict[str, str]:
+    """Derive CLI config roots from the already validated Profile Home only."""
+    if type(hermes_home) is not str or not hermes_home:
+        _refuse()
+    home_path = Path(hermes_home)
+    values = {
+        "HERMES_HOME": str(home_path),
+        "GH_CONFIG_DIR": str(home_path / "gh-config"),
+        "XDG_CONFIG_HOME": str(home_path / "xdg-config"),
+        "COPILOT_GH_HOST": hashlib.sha256(str(home_path).encode("utf-8")).hexdigest()[:24]
+        + ".opentrad.invalid",
+        "CODEX_HOME": str(home_path / "codex-home"),
+    }
+    for directory in (
+        home_path,
+        home_path / "gh-config",
+        home_path / "xdg-config",
+        home_path / "codex-home",
+    ):
+        try:
+            metadata = directory.lstat()
+        except (OSError, TypeError, ValueError):
+            _refuse()
+        if (
+            not directory.is_absolute()
+            or Path(os.path.normpath(os.fspath(directory))) != directory
+            or not stat.S_ISDIR(metadata.st_mode)
+            or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+        ):
+            _refuse()
+        _validate_private_directory(directory)
+    return values
 
 
 def validate_bootstrap_paths(
@@ -874,535 +391,559 @@ def validate_bootstrap_paths(
     hermes_home: os.PathLike[str] | str,
     cwd: os.PathLike[str] | str,
 ) -> BootstrapPaths:
-    """Validate the exact launcher, private state root, and dedicated cwd."""
-
     launcher_path = _canonical_existing_path(launcher, directory=False)
     home_path = _canonical_existing_path(hermes_home, directory=True)
     cwd_path = _canonical_existing_path(cwd, directory=True)
-
-    launcher_mode = stat.S_IMODE(launcher_path.lstat().st_mode)
-    if launcher_mode & 0o022 or launcher_mode & 0o400 == 0:
-        _reject("launcher_permissions")
+    if stat.S_IMODE(launcher_path.lstat().st_mode) & 0o022:
+        _refuse()
     _validate_private_directory(home_path)
     _validate_private_directory(cwd_path)
     if cwd_path != home_path / "gateway-cwd":
-        _reject("gateway_cwd")
+        _refuse()
+    return BootstrapPaths(launcher_path, home_path, cwd_path)
 
-    return BootstrapPaths(launcher=launcher_path, hermes_home=home_path, cwd=cwd_path)
+
+def validate_workspace_root(value: object) -> Path:
+    if type(value) is not str or not value or len(value) > 4096:
+        _refuse()
+    return _canonical_existing_path(value, directory=True)
 
 
-def _ensure_private_directory(path: Path) -> Path:
+def validate_bundled_skills_root(
+    value: object,
+    python_executable: os.PathLike[str] | str,
+) -> Path:
+    """Accept only the immutable skills tree beside this exact managed venv."""
+
     try:
-        path.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    except (OSError, RuntimeError):
-        _reject("private_directory")
-
-    flags = os.O_RDONLY
-    flags |= getattr(os, "O_DIRECTORY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(path, flags)
-        try:
-            metadata = os.fstat(fd)
-            if not stat.S_ISDIR(metadata.st_mode):
-                _reject("private_directory")
-            if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
-                _reject("private_directory")
-            os.fchmod(fd, 0o700)
-        finally:
-            os.close(fd)
-        canonical = path.resolve(strict=True)
+        if type(value) is not str or not value or len(value) > 4096:
+            _refuse()
+        executable = Path(python_executable)
+        if (
+            not executable.is_absolute()
+            or executable.parent.name != "bin"
+            or executable.parent.parent.name != "venv"
+        ):
+            _refuse()
+        runtime_root = executable.parent.parent.parent.resolve(strict=True)
+        selected = _canonical_existing_path(value, directory=True)
+        expected = runtime_root / "share" / "hermes" / "skills"
+        if selected != expected:
+            _refuse()
+        for directory in (
+            runtime_root / "share",
+            runtime_root / "share" / "hermes",
+            selected,
+        ):
+            metadata = directory.lstat()
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+                or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+            ):
+                _refuse()
+        if stat.S_IMODE(selected.lstat().st_mode) != 0o500:
+            _refuse()
+        return selected
     except LauncherRefusal:
         raise
-    except (OSError, RuntimeError):
-        _reject("private_directory")
-    if canonical != path:
-        _reject("private_directory")
-    return canonical
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _refuse()
 
 
-def prepare_private_environment(
-    hermes_home: os.PathLike[str] | str,
-    environ: MutableMapping[str, str] | None = None,
-) -> RuntimeDirectories:
-    """Apply umask 077, create private roots, and replace inherited env by allowlist."""
-
-    environment = os.environ if environ is None else environ
-    home_path = _canonical_existing_path(hermes_home, directory=True)
-    _validate_private_directory(home_path)
-    os.umask(0o077)
-    process_home = _ensure_private_directory(home_path / "process-home")
-    temporary_directory = _ensure_private_directory(home_path / "tmp")
-
-    inherited = {
-        key: value
-        for key, value in environment.items()
-        if key in _INHERITED_ENVIRONMENT_ALLOWLIST and isinstance(value, str)
-    }
-    environment.clear()
-    environment.update(inherited)
-    environment["HERMES_HOME"] = str(home_path)
-    environment["HOME"] = str(process_home)
-    environment["TMPDIR"] = str(temporary_directory)
-    environment.update(_SAFE_MODE_ENVIRONMENT)
-    return RuntimeDirectories(home=process_home, tmp=temporary_directory)
-
-
-def disable_process_diagnostics() -> None:
-    """Disable core dumps and Python faulthandler before any secret is retained."""
-
+def disable_core_dumps() -> None:
     try:
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         faulthandler.disable()
-    except (OSError, ValueError, RuntimeError):
-        _reject("diagnostics")
+    except (OSError, RuntimeError, ValueError):
+        _refuse()
+
+
+def verify_interpreter_contract(version: tuple[int, int, int] | None = None) -> None:
+    selected = tuple(sys.version_info[:3]) if version is None else tuple(version)
+    if selected != PINNED_PYTHON:
+        _refuse()
+    if version is not None:
+        return
+    flags = sys.flags
+    if (
+        sys.version_info.releaselevel != "final"
+        or not flags.isolated
+        or not flags.no_site
+        or not sys.dont_write_bytecode
+        or not flags.utf8_mode
+        or not getattr(flags, "safe_path", False)
+        or not getattr(sys.stdout, "write_through", False)
+        or len(sys.argv) != 1
+        or not Path(sys.argv[0]).is_absolute()
+        or not Path(sys.executable).is_absolute()
+    ):
+        _refuse()
 
 
 def infer_site_packages(
     python_executable: os.PathLike[str] | str,
-    version: tuple[int, int],
-    *,
-    platform: str = os.name,
+    version: tuple[int, int, int],
 ) -> Path:
-    """Infer one venv site-packages path without importing or executing ``site``."""
-
     try:
         executable = Path(python_executable)
-        if not executable.is_absolute() or len(version) != 2:
-            _reject("runtime_path")
-        if platform == "nt":
-            if executable.parent.name.casefold() != "scripts":
-                _reject("runtime_path")
-            runtime_root = executable.parent.parent
-            candidate = runtime_root / "Lib" / "site-packages"
-        elif platform == "posix":
-            if executable.parent.name != "bin":
-                _reject("runtime_path")
-            runtime_root = executable.parent.parent
-            candidate = (
-                runtime_root
-                / "lib"
-                / f"python{version[0]}.{version[1]}"
-                / "site-packages"
-            )
-        else:
-            _reject("runtime_platform")
-
-        root = runtime_root.resolve(strict=True)
+        if not executable.is_absolute() or tuple(version) != PINNED_PYTHON:
+            _refuse()
+        if executable.parent.name != "bin":
+            _refuse()
+        runtime_root = executable.parent.parent.resolve(strict=True)
+        candidate = (
+            runtime_root / "lib" / f"python{version[0]}.{version[1]}" / "site-packages"
+        )
         site_packages = candidate.resolve(strict=True)
-        site_packages.relative_to(root)
+        site_packages.relative_to(runtime_root)
         metadata = site_packages.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+            or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+        ):
+            _refuse()
+        return site_packages
     except LauncherRefusal:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
-        _reject("runtime_path")
-
-    if not stat.S_ISDIR(metadata.st_mode):
-        _reject("runtime_path")
-    if metadata.st_mode & 0o022:
-        _reject("runtime_permissions")
-    if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
-        _reject("runtime_owner")
-    return site_packages
+        _refuse()
 
 
-def activate_site_packages(
-    site_packages: Path, sys_path: list[str] | None = None
-) -> None:
-    """Append a validated directory without processing .pth or sitecustomize.
-
-    The isolated interpreter's standard-library paths must stay ahead of the
-    managed runtime so an added site-packages module cannot shadow stdlib.
-    """
-
-    target_path = sys.path if sys_path is None else sys_path
+def activate_site_packages(site_packages: Path, sys_path: list[str] | None = None) -> None:
+    target = sys.path if sys_path is None else sys_path
     value = str(site_packages)
-    if value not in target_path:
-        target_path.append(value)
+    if value in target or any(
+        entry and entry != value and Path(entry).name in {"site-packages", "dist-packages"}
+        for entry in target
+    ):
+        _refuse()
+    target.append(value)
 
 
-class AuditPolicy:
-    """Fail-closed process/network/write primitive.
-
-    Relative writes are always rejected because Python audit events omit the
-    ``dir_fd`` that determines their real target. Absolute write paths carried
-    by audited operations must resolve under HERMES_HOME. External reads,
-    native extensions, and operations without a suitable audit event remain
-    outside this hook's guarantees, so this is not an OS sandbox.
-    """
-
-    __slots__ = ("_hermes_home", "_cwd", "_broker_endpoint")
-
-    def __init__(self, hermes_home: Path, cwd: Path, *, broker_port: int) -> None:
-        if type(broker_port) is not int or not 1 <= broker_port <= 65535:
-            _reject("audit_port")
-        self._hermes_home = hermes_home
-        self._cwd = cwd
-        self._broker_endpoint = ("127.0.0.1", broker_port)
-
-    def __call__(self, event: str, args: tuple[object, ...]) -> None:
-        if event == _SUBINTERPRETER_AUDIT_EVENT:
-            _terminate_for_unsafe_audit_event()
-        if event in _PROCESS_AUDIT_EVENTS or event.startswith(("os.exec", "os.spawn")):
-            _reject("audit_process")
-        if event in _CONTROL_AUDIT_EVENTS:
-            _reject("audit_control")
-        if event.startswith("socket."):
-            self._check_socket(event, args)
-            return
-        if event in _FD_MUTATION_AUDIT_EVENTS:
-            _reject("audit_file")
-        if event == "os.chdir":
-            _reject("audit_cwd")
-        if event == "open":
-            self._check_open(args)
-        elif event in _PATH_MUTATION_EVENT_INDICES:
-            for index in _PATH_MUTATION_EVENT_INDICES[event]:
-                if index < len(args):
-                    self._require_private_write(args[index])
-
-    def _check_socket(self, event: str, args: tuple[object, ...]) -> None:
-        if event == "socket.__new__":
-            if (
-                len(args) != 4
-                or args[1] != socket.AF_INET
-                or args[2] != socket.SOCK_STREAM
-                or args[3] not in {0, socket.IPPROTO_TCP}
-            ):
-                _reject("audit_network")
-            return
-        if event == "socket.connect":
-            address = args[1] if len(args) > 1 else None
-            if not self._is_broker_address(address):
-                _reject("audit_network")
-            return
-        if event == "socket.getaddrinfo":
-            address = (args[0], args[1]) if len(args) > 1 else None
-            if not self._is_broker_address(address):
-                _reject("audit_network")
-            return
-        _reject("audit_network")
-
-    def _is_broker_address(self, value: object) -> bool:
-        return (
-            isinstance(value, tuple)
-            and len(value) == 2
-            and type(value[0]) is str
-            and type(value[1]) is int
-            and value == self._broker_endpoint
-        )
-
-    def _check_open(self, args: tuple[object, ...]) -> None:
-        if not args:
-            _reject("audit_file")
-        path = args[0]
-        mode = args[1] if len(args) > 1 else None
-        flags = args[2] if len(args) > 2 else 0
-        writes = isinstance(mode, str) and any(
-            character in mode for character in "wax+"
-        )
-        if type(flags) is int:
-            write_flags = (
-                os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
-            )
-            writes = writes or bool(flags & write_flags)
-        if writes:
-            self._require_private_write(path)
-
-    def _require_private_write(self, value: object) -> None:
-        try:
-            path = Path(os.fspath(value))
-            if not path.is_absolute():
-                _reject("audit_file")
-            resolved = path.resolve(strict=False)
-            resolved.relative_to(self._hermes_home)
-        except LauncherRefusal:
-            raise
-        except (OSError, RuntimeError, TypeError, ValueError):
-            _reject("audit_file")
-
-
-def install_audit_policy(paths: BootstrapPaths, capability: Capability) -> AuditPolicy:
-    policy = AuditPolicy(
-        paths.hermes_home, paths.cwd, broker_port=capability.broker_port
+def _provider_values(payload: BootstrapPayload) -> dict[str, str]:
+    if payload.auth_mode != "api_key" or payload.api_key is None:
+        return {}
+    names = _PROVIDER_ENVIRONMENT.get(
+        payload.provider_slug,
+        ("OPENTRAD_PROVIDER_API_KEY", "OPENTRAD_PROVIDER_BASE_URL"),
     )
-    sys.addaudithook(policy)
-    return policy
+    values = {names[0]: payload.api_key}
+    if payload.base_url is not None:
+        values[names[1]] = payload.base_url
+    return values
 
 
-def is_supported_hermes_python_version(major: object, minor: object) -> bool:
-    """Return whether the pinned Hermes runtime supports this Python pair."""
-
-    return type(major) is int and type(minor) is int and major == 3 and 11 <= minor < 14
-
-
-def verify_interpreter_contract() -> None:
-    """Require the exact isolation properties of ``-I -S -B -u -X utf8``."""
-
-    if not is_supported_hermes_python_version(
-        sys.version_info.major,
-        sys.version_info.minor,
-    ):
-        _reject("interpreter_version")
-    flags = sys.flags
-    if (
-        not flags.isolated
-        or not flags.no_site
-        or not sys.dont_write_bytecode
-        or not flags.utf8_mode
-    ):
-        _reject("interpreter_flags")
-    if not getattr(sys.stdout, "write_through", False):
-        _reject("interpreter_buffering")
-    if len(sys.argv) != 1 or not Path(sys.argv[0]).is_absolute():
-        _reject("interpreter_arguments")
-    if not Path(sys.executable).is_absolute():
-        _reject("interpreter_executable")
+def _execution_values(payload: BootstrapPayload, workspace_root: Path) -> dict[str, str]:
+    common = {
+        **_COMMON_EXECUTION_ENVIRONMENT,
+        "TERMINAL_CWD": str(workspace_root),
+    }
+    if payload.execution_backend == "docker":
+        return {**common, **_DOCKER_EXECUTION_ENVIRONMENT}
+    return {
+        **common,
+        "TERMINAL_ENV": "local",
+        "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE": "false",
+        "TERMINAL_DOCKER_RUN_AS_HOST_USER": "true",
+    }
 
 
-def bootstrap_pre_import(fd: int = CAPABILITY_FD) -> BootstrapState:
-    """Establish the entire trusted pre-import state, then return in-memory data."""
+def _valid_proxy_url(value: object) -> str:
+    if type(value) is not str or len(value) > 2048:
+        _refuse()
+    match = _PROXY_URL_PATTERN.fullmatch(value)
+    if match is None:
+        _refuse()
+    raw_host, raw_port = match.groups()
+    host = raw_host[1:-1] if raw_host.startswith("[") else raw_host
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.split(".")
+        if not labels or any(_PROXY_HOST_LABEL_PATTERN.fullmatch(label) is None for label in labels):
+            _refuse()
+        if host.casefold() != raw_host:
+            _refuse()
+    else:
+        canonical_host = f"[{host}]" if address.version == 6 else host
+        if canonical_host != raw_host:
+            _refuse()
+    port = int(raw_port)
+    if port < 1 or port > 65535 or str(port) != raw_port:
+        _refuse()
+    return value
 
+
+def _trusted_proxy_environment(environment: MutableMapping[str, str]) -> dict[str, str]:
+    trusted: dict[str, str] = {}
+    supplied_proxy = False
+    for private_name, public_name in _NETWORK_INPUT_ENVIRONMENT.items():
+        value = environment.get(private_name)
+        if value is None:
+            continue
+        trusted[public_name] = _valid_proxy_url(value)
+        supplied_proxy = True
+    no_proxy = environment.get(_NETWORK_NO_PROXY_INPUT_ENV)
+    if supplied_proxy:
+        if no_proxy != _NETWORK_NO_PROXY_VALUE:
+            _refuse()
+        trusted["NO_PROXY"] = _NETWORK_NO_PROXY_VALUE
+    elif no_proxy is not None:
+        _refuse()
+    return trusted
+
+
+def configure_environment(
+    payload: BootstrapPayload,
+    environment: MutableMapping[str, str] | None = None,
+    *,
+    workspace_root: Path | None = None,
+    bundled_skills_root: Path | None = None,
+) -> Path:
+    target = os.environ if environment is None else environment
+    selected_workspace = (
+        validate_workspace_root(target.get(_WORKSPACE_INPUT_ENV))
+        if workspace_root is None
+        else _canonical_existing_path(workspace_root, directory=True)
+    )
+    selected_bundled_skills = (
+        _canonical_existing_path(target.get(_BUNDLED_SKILLS_INPUT_ENV), directory=True)
+        if bundled_skills_root is None
+        else _canonical_existing_path(bundled_skills_root, directory=True)
+    )
+    inherited = {
+        key: value
+        for key, value in target.items()
+        if key in _ENVIRONMENT_ALLOWLIST and type(value) is str
+    }
+    trusted_proxy = _trusted_proxy_environment(target)
+    profile_config = _profile_config_environment(target.get("HERMES_HOME"))
+    target.clear()
+    target.update(inherited)
+    target.update(profile_config)
+    target.update(trusted_proxy)
+    target[_BUNDLED_SKILLS_INPUT_ENV] = str(selected_bundled_skills)
+    target["PYTHONNOUSERSITE"] = "1"
+    target["PYTHONDONTWRITEBYTECODE"] = "1"
+    target["PYTHONUTF8"] = "1"
+    target.update(_provider_values(payload))
+    target.update(_execution_values(payload, selected_workspace))
+    return selected_workspace
+
+
+def install_provider_environment_guard(
+    payload: BootstrapPayload,
+    env_loader_module: object,
+    environment: MutableMapping[str, str] | None = None,
+    *,
+    workspace_root: Path | None = None,
+    bundled_skills_root: Path | None = None,
+) -> None:
+    """Restore trusted controls while retaining ordinary Profile tool secrets."""
+
+    target = os.environ if environment is None else environment
+    protected = dict(target)
+    protected.update(_profile_config_environment(target.get("HERMES_HOME")))
+    protected.update(_provider_values(payload))
+    authority_controls: set[str] = set()
+    if payload.provider_slug == "anthropic":
+        authority_controls.add("ANTHROPIC_BASE_URL")
+        authority_controls.update(
+            ("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+            if payload.auth_mode == "api_key"
+            else ("ANTHROPIC_API_KEY",)
+        )
+    if bundled_skills_root is not None:
+        protected[_BUNDLED_SKILLS_INPUT_ENV] = str(
+            _canonical_existing_path(bundled_skills_root, directory=True)
+        )
+    if workspace_root is not None:
+        protected.update(_execution_values(payload, workspace_root))
+    original = getattr(env_loader_module, "load_hermes_dotenv", None)
+    if not callable(original) or getattr(original, "__opentrad_guarded__", False):
+        _refuse()
+
+    @functools.wraps(original)
+    def guarded(*args: object, **kwargs: object) -> object:
+        try:
+            return original(*args, **kwargs)
+        finally:
+            for name in tuple(target):
+                if name in protected:
+                    continue
+                if name in authority_controls or name in _DOTENV_CONTROL_ENVIRONMENT or name.startswith(
+                    _DOTENV_CONTROL_PREFIXES
+                ):
+                    target.pop(name, None)
+            target.update(protected)
+
+    guarded.__opentrad_guarded__ = True  # type: ignore[attr-defined]
+    setattr(env_loader_module, "load_hermes_dotenv", guarded)
+
+
+def install_execution_environment_guard(
+    payload: BootstrapPayload,
+    workspace_root: Path,
+    config_module: object,
+    environment: MutableMapping[str, str] | None = None,
+) -> None:
+    protected = _execution_values(payload, workspace_root)
+    if not protected:
+        return
+    target = os.environ if environment is None else environment
+    original = getattr(config_module, "apply_terminal_config_to_env", None)
+    if not callable(original) or getattr(original, "__opentrad_guarded__", False):
+        _refuse()
+
+    @functools.wraps(original)
+    def guarded(*args: object, **kwargs: object) -> object:
+        try:
+            return original(*args, **kwargs)
+        finally:
+            target.update(protected)
+            supplied = kwargs.get("env")
+            if supplied is not None and hasattr(supplied, "update"):
+                supplied.update(protected)
+
+    guarded.__opentrad_guarded__ = True  # type: ignore[attr-defined]
+    setattr(config_module, "apply_terminal_config_to_env", guarded)
+
+
+def _require_module_origin(module: object, site_packages: Path) -> None:
+    try:
+        origin = Path(getattr(module, "__file__")).resolve(strict=False)
+        origin.relative_to(site_packages.resolve(strict=True))
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        _refuse()
+
+
+def install_anthropic_auth_guard(module: object, payload: BootstrapPayload) -> None:
+    """Keep Anthropic credentials inside the selected Profile authority."""
+
+    names = (
+        "read_claude_code_credentials",
+        "_read_claude_code_credentials_from_keychain",
+        "_read_claude_code_credentials_from_file",
+    )
+
+    def no_external_credentials() -> None:
+        return None
+
+    for name in names:
+        if not callable(getattr(module, name, None)):
+            _refuse()
+        setattr(module, name, no_external_credentials)
+    if payload.provider_slug != "anthropic":
+        return
+    original_resolve = getattr(module, "resolve_anthropic_token", None)
+    is_oauth_token = getattr(module, "_is_oauth_token", None)
+    if not callable(original_resolve) or not callable(is_oauth_token):
+        _refuse()
+    if payload.auth_mode == "api_key":
+        credential = payload.api_key
+        setattr(module, "resolve_anthropic_token", lambda: credential)
+        return
+
+    def resolve_oauth_only() -> str | None:
+        token = original_resolve()
+        return token if type(token) is str and is_oauth_token(token) else None
+
+    setattr(module, "resolve_anthropic_token", resolve_oauth_only)
+
+
+def install_provider_pool_guard(module: object, payload: BootstrapPayload) -> None:
+    """Enforce Profile auth and endpoint authority before pool selection."""
+
+    original = getattr(module, "load_pool", None)
+    if not callable(original) or getattr(original, "__opentrad_guarded__", False):
+        _refuse()
+
+    @functools.wraps(original)
+    def guarded(provider: object, *args: object, **kwargs: object) -> object:
+        if (
+            (
+                provider == "anthropic"
+                and payload.provider_slug == "anthropic"
+                and payload.auth_mode == "api_key"
+            )
+            or (
+                provider == "copilot"
+                and payload.provider_slug == "copilot"
+                and payload.auth_mode == "oauth"
+            )
+        ):
+            return None
+        pool = original(provider, *args, **kwargs)
+        if provider != "anthropic" or payload.provider_slug != "anthropic":
+            return pool
+        entries = getattr(pool, "_entries", None)
+        if type(entries) is not list:
+            _refuse()
+        # The original pool object keeps refresh/rotation intact. Its next
+        # upstream persist deliberately retires API-key entries from this
+        # OAuth-authority Profile Home instead of letting them revive later.
+        official_base_url = "https://api.anthropic.com"
+        pool._entries = [  # type: ignore[attr-defined]
+            entry
+            for entry in entries
+            if getattr(entry, "auth_type", None) == "oauth"
+            and getattr(entry, "base_url", None) in (None, "", official_base_url)
+        ]
+        return pool
+
+    guarded.__opentrad_guarded__ = True  # type: ignore[attr-defined]
+    setattr(module, "load_pool", guarded)
+
+
+def validate_skills_sync_result(value: object) -> None:
+    if type(value) is not dict or type(value.get("total_bundled")) is not int:
+        _refuse()
+    if value["total_bundled"] != 72 or type(value.get("skipped")) is not int:
+        _refuse()
+    skipped = value["skipped"]
+    if skipped < 0 or skipped > 72:
+        _refuse()
+    names: list[str] = []
+    for key in ("copied", "updated", "user_modified", "suppressed"):
+        entries = value.get(key)
+        if type(entries) is not list:
+            _refuse()
+        for entry in entries:
+            if type(entry) is not str or not entry or len(entry) > 256 or "\0" in entry:
+                _refuse()
+            names.append(entry)
+    if len(names) + skipped != 72 or len(set(names)) != len(names):
+        _refuse()
+
+
+def load_upstream_gateway(
+    site_packages: Path,
+    payload: BootstrapPayload,
+    workspace_root: Path,
+    bundled_skills_root: Path,
+    *,
+    version_getter: Callable[[str], str] = importlib.metadata.version,
+    importer: Callable[[str], object] = importlib.import_module,
+) -> Callable[[], object]:
+    try:
+        if version_getter("hermes-agent") != PINNED_HERMES_VERSION:
+            _refuse()
+        hermes_cli = importer("hermes_cli")
+        _require_module_origin(hermes_cli, site_packages)
+        if (
+            getattr(hermes_cli, "__version__", None) != PINNED_HERMES_VERSION
+            or getattr(hermes_cli, "__release_date__", None) != PINNED_HERMES_RELEASE
+        ):
+            _refuse()
+        credential_pool = importer("agent.credential_pool")
+        _require_module_origin(credential_pool, site_packages)
+        install_provider_pool_guard(credential_pool, payload)
+        anthropic_adapter = importer("agent.anthropic_adapter")
+        _require_module_origin(anthropic_adapter, site_packages)
+        install_anthropic_auth_guard(anthropic_adapter, payload)
+        runtime_provider = importer("hermes_cli.runtime_provider")
+        _require_module_origin(runtime_provider, site_packages)
+        setattr(runtime_provider, "load_pool", getattr(credential_pool, "load_pool"))
+        env_loader = importer("hermes_cli.env_loader")
+        _require_module_origin(env_loader, site_packages)
+        install_provider_environment_guard(
+            payload,
+            env_loader,
+            workspace_root=workspace_root,
+            bundled_skills_root=bundled_skills_root,
+        )
+        config_module = importer("hermes_cli.config")
+        _require_module_origin(config_module, site_packages)
+        install_execution_environment_guard(payload, workspace_root, config_module)
+        os.environ[_BUNDLED_SKILLS_INPUT_ENV] = str(bundled_skills_root)
+        skills_sync = importer("tools.skills_sync")
+        _require_module_origin(skills_sync, site_packages)
+        sync_skills = getattr(skills_sync, "sync_skills", None)
+        if not callable(sync_skills):
+            _refuse()
+        validate_skills_sync_result(sync_skills(quiet=True))
+        entry = importer("tui_gateway.entry")
+        _require_module_origin(entry, site_packages)
+        gateway_main = getattr(entry, "main", None)
+        if not callable(gateway_main):
+            _refuse()
+        return gateway_main
+    except LauncherRefusal:
+        raise
+    except BaseException:
+        _refuse()
+
+
+def run_upstream_gateway(gateway_main: Callable[[], object]) -> int:
+    try:
+        gateway_main()
+    except SystemExit as exc:
+        if exc.code not in (None, 0):
+            _refuse()
+    return 0
+
+
+def bootstrap_pre_import(fd: int = BOOTSTRAP_FD) -> BootstrapState:
     verify_interpreter_contract()
     hermes_home = os.environ.get("HERMES_HOME")
     if not hermes_home:
-        _reject("hermes_home")
+        _refuse()
     try:
         cwd = Path.cwd()
     except OSError:
-        _reject("gateway_cwd")
+        _refuse()
     paths = validate_bootstrap_paths(Path(sys.argv[0]), hermes_home, cwd)
-    directories = prepare_private_environment(paths.hermes_home)
-    disable_process_diagnostics()
-    capability = read_capability_fd(fd)
-    site_packages = infer_site_packages(
+    workspace_root = validate_workspace_root(os.environ.get(_WORKSPACE_INPUT_ENV))
+    bundled_skills_root = validate_bundled_skills_root(
+        os.environ.get(_BUNDLED_SKILLS_INPUT_ENV),
         Path(sys.executable),
-        (sys.version_info.major, sys.version_info.minor),
     )
+    os.umask(0o077)
+    disable_core_dumps()
+    payload = read_bootstrap_fd(fd)
+    configure_environment(
+        payload,
+        workspace_root=workspace_root,
+        bundled_skills_root=bundled_skills_root,
+    )
+    private_tmp = paths.hermes_home / "tmp"
+    private_tmp.mkdir(mode=0o700, exist_ok=True)
+    _validate_private_directory(_canonical_existing_path(private_tmp, directory=True))
+    os.environ["TMPDIR"] = str(private_tmp)
+    site_packages = infer_site_packages(Path(sys.executable), PINNED_PYTHON)
     activate_site_packages(site_packages)
-    policy = install_audit_policy(paths, capability)
     return BootstrapState(
-        paths=paths,
-        directories=directories,
-        capability=capability,
-        site_packages=site_packages,
-        audit_policy=policy,
+        paths,
+        payload,
+        site_packages,
+        workspace_root,
+        bundled_skills_root,
     )
-
-
-def _capture_binary_stdin() -> BinaryIO:
-    """Capture the inherited binary request stream before runtime redirection."""
-
-    stream = getattr(sys.stdin, "buffer", None)
-    if stream is None or not callable(getattr(stream, "readline", None)):
-        _reject("stdin_transport")
-    return stream
-
-
-def _read_owned_runtime_source(runtime_path: Path) -> bytes:
-    """Read one immutable-looking regular file without following a symlink."""
-
-    no_follow = getattr(os, "O_NOFOLLOW", None)
-    close_on_exec = getattr(os, "O_CLOEXEC", None)
-    if type(no_follow) is not int or type(close_on_exec) is not int:
-        _reject("owned_runtime_platform")
-
-    descriptor: int | None = None
-    try:
-        lexical = Path(os.path.normpath(os.fspath(runtime_path)))
-        if not runtime_path.is_absolute() or lexical != runtime_path:
-            _reject("owned_runtime_path")
-        before = runtime_path.lstat()
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_mode & 0o022
-            or before.st_mode & 0o400 == 0
-            or before.st_size <= 0
-            or before.st_size > OWNED_RUNTIME_MAX_BYTES
-            or (hasattr(os, "getuid") and before.st_uid != os.getuid())
-        ):
-            _reject("owned_runtime_metadata")
-
-        descriptor = os.open(runtime_path, os.O_RDONLY | no_follow | close_on_exec)
-        opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-            or opened.st_uid != before.st_uid
-            or opened.st_mode != before.st_mode
-            or opened.st_size != before.st_size
-        ):
-            _reject("owned_runtime_race")
-
-        source = bytearray()
-        while len(source) <= OWNED_RUNTIME_MAX_BYTES:
-            chunk = os.read(
-                descriptor,
-                min(65_536, OWNED_RUNTIME_MAX_BYTES + 1 - len(source)),
-            )
-            if chunk == b"":
-                break
-            source.extend(chunk)
-        after = os.fstat(descriptor)
-        if (
-            len(source) != opened.st_size
-            or len(source) > OWNED_RUNTIME_MAX_BYTES
-            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
-        ):
-            _reject("owned_runtime_race")
-        return bytes(source)
-    except LauncherRefusal:
-        raise
-    except BaseException:
-        _reject("owned_runtime_read")
-    finally:
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-
-
-def _load_owned_runtime(launcher_path: Path) -> types.ModuleType:
-    """Hash-pin and compile the reviewed sibling runtime without importing pyc."""
-
-    try:
-        canonical_launcher = _canonical_existing_path(
-            launcher_path,
-            directory=False,
-        )
-        launcher_mode = stat.S_IMODE(canonical_launcher.lstat().st_mode)
-        if launcher_mode & 0o022 or launcher_mode & 0o400 == 0:
-            _reject("owned_launcher_metadata")
-        runtime_path = canonical_launcher.with_name(OWNED_RUNTIME_FILENAME)
-        if OWNED_RUNTIME_MODULE_NAME in sys.modules:
-            _reject("owned_runtime_collision")
-        source = _read_owned_runtime_source(runtime_path)
-        if hashlib.sha256(source).hexdigest() != OWNED_RUNTIME_SHA256:
-            _reject("owned_runtime_digest")
-        code = compile(
-            source,
-            str(runtime_path),
-            "exec",
-            flags=0,
-            dont_inherit=True,
-            optimize=0,
-        )
-        module = types.ModuleType(OWNED_RUNTIME_MODULE_NAME)
-        module.__file__ = str(runtime_path)
-        module.__package__ = ""
-        module.__loader__ = None
-        if OWNED_RUNTIME_MODULE_NAME in sys.modules:
-            _reject("owned_runtime_collision")
-        sys.modules[OWNED_RUNTIME_MODULE_NAME] = module
-        try:
-            exec(code, module.__dict__)
-        except BaseException:
-            if sys.modules.get(OWNED_RUNTIME_MODULE_NAME) is module:
-                sys.modules.pop(OWNED_RUNTIME_MODULE_NAME, None)
-            _reject("owned_runtime_execution")
-        if sys.modules.get(OWNED_RUNTIME_MODULE_NAME) is not module:
-            _reject("owned_runtime_registry")
-        return module
-    except LauncherRefusal:
-        raise
-    except BaseException:
-        if (
-            "module" in locals()
-            and sys.modules.get(OWNED_RUNTIME_MODULE_NAME) is module
-        ):
-            sys.modules.pop(OWNED_RUNTIME_MODULE_NAME, None)
-        _reject("owned_runtime_load")
-
-
-def _instantiate_owned_runtime(
-    runtime_module: types.ModuleType,
-    site_packages: Path,
-    transport: SafeJsonTransport,
-) -> object:
-    """Create the exact guarded runtime type exported by the pinned source."""
-
-    try:
-        if (
-            type(runtime_module) is not types.ModuleType
-            or runtime_module.__name__ != OWNED_RUNTIME_MODULE_NAME
-            or sys.modules.get(OWNED_RUNTIME_MODULE_NAME) is not runtime_module
-        ):
-            _reject("owned_runtime_module")
-        loader = getattr(runtime_module, "load_pinned_runtime", None)
-        guarded_type = getattr(runtime_module, "GuardedHermesRuntime", None)
-        if (
-            type(loader) is not types.FunctionType
-            or loader.__module__ != runtime_module.__name__
-            or type(guarded_type) is not type
-            or guarded_type.__module__ != runtime_module.__name__
-        ):
-            _reject("owned_runtime_contract")
-        guarded = loader(site_packages, transport)
-        if type(guarded) is not guarded_type:
-            _reject("owned_runtime_result")
-        return guarded
-    except LauncherRefusal:
-        raise
-    except BaseException:
-        _reject("owned_runtime_start")
 
 
 def _write_generic_refusal() -> None:
     try:
-        os.write(2, GENERIC_STDERR)
-    except OSError:
+        sys.stderr.write(GENERIC_STDERR)
+        sys.stderr.flush()
+    except BaseException:
         pass
 
 
 def main() -> int:
-    transport: SafeJsonTransport | None = None
-    shutdown_callback: Callable[[], object] | None = None
-    loop_started = False
     try:
         state = bootstrap_pre_import()
-        input_stream = _capture_binary_stdin()
-        transport = SafeJsonTransport.capture_stdout(state.capability)
-        policy_context = RpcPolicyContext(state.paths.cwd)
-        runtime_module = _load_owned_runtime(state.paths.launcher)
-        guarded = _instantiate_owned_runtime(
-            runtime_module,
+        gateway_main = load_upstream_gateway(
             state.site_packages,
-            transport,
+            state.payload,
+            state.workspace_root,
+            state.bundled_skills_root,
         )
-        dispatcher = getattr(guarded, "dispatch", None)
-        shutdown = getattr(guarded, "shutdown", None)
-        if not callable(dispatcher) or not callable(shutdown):
-            _reject("owned_runtime_api")
-        shutdown_callback = shutdown
-        loop_started = True
-        if not run_ndjson_loop(
-            input_stream,
-            transport,
-            dispatcher,
-            shutdown_callback,
-            policy_context,
-        ):
-            _reject("owned_runtime_loop")
-        return 0
+        return run_upstream_gateway(gateway_main)
     except BaseException:
         _write_generic_refusal()
         return EX_CONFIG
-    finally:
-        if not loop_started:
-            if shutdown_callback is not None:
-                try:
-                    shutdown_callback()
-                except BaseException:
-                    pass
-            if transport is not None:
-                try:
-                    transport.close()
-                except BaseException:
-                    pass
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@ export const IpcChannels = {
   SettingsGet: "settings:get",
   SettingsSet: "settings:set",
   PtySpawn: "pty:spawn",
+  PtyAttach: "pty:attach",
   PtyWrite: "pty:write",
   PtyResize: "pty:resize",
   PtyKill: "pty:kill",
@@ -46,12 +47,15 @@ export const IpcChannels = {
   PtyExit: "pty:exit",
   InstallerRunCcInstall: "installer:run-cc-install",
   InstallerSupportsAutoInstall: "installer:supports-auto-install",
+  HermesRuntimeInstallProgress: "installer:hermes-runtime-progress",
   CCDetectLoopStart: "cc:detect-loop-start",
   CCDetectLoopStop: "cc:detect-loop-stop",
   AuthStartLoginFlow: "auth:start-login-flow",
+  AuthStartHermesOAuth: "auth:start-hermes-oauth",
   ShellOpenExternal: "shell:open-external",
   // -------- agent domain（重启方向 M0 spike：自建 agent loop 的 desktop 接线） --------
   AgentStartSession: "agent:start-session",
+  AgentWorkspaceSelect: "agent:workspace:select",
   AgentSend: "agent:send",
   AgentAbort: "agent:abort",
   // main → renderer push：AgentEvent 流
@@ -59,11 +63,13 @@ export const IpcChannels = {
   AgentProfilesList: "agent:profiles:list",
   AgentProfilesSave: "agent:profiles:save",
   AgentProfilesDelete: "agent:profiles:delete",
-  AgentCredentialsSet: "agent:credentials:set",
-  AgentCredentialsDelete: "agent:credentials:delete",
   // 会话历史（侧栏「任务」列表 + 回放）
   AgentSessionsList: "agent:sessions:list",
   AgentSessionLoad: "agent:session:load",
+  AgentSessionOpen: "agent:session:open",
+  // Hermes 控制面交互独立于 AgentEvent；敏感响应只经 invoke 进入 main。
+  AgentHermesInteractionRequest: "agent:hermes-interaction:request",
+  AgentHermesInteractionResponse: "agent:hermes-interaction:response",
   // 更新检查（M0.5：检查 + 提示下载）
   UpdateCheck: "update:check",
   UpdateOpenReleasePage: "update:open-release-page",

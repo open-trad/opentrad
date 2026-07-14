@@ -16,14 +16,15 @@
 import type { ProviderProfile } from "@opentrad/model-providers";
 import type {
   AgentAbortRequest,
-  AgentCredentialDeleteRequest,
-  AgentCredentialSetRequest,
   AgentEvent,
+  AgentProfileCredential,
   AgentProfileDeleteRequest,
   AgentSendRequest,
   AgentSessionMeta,
+  AgentSessionOpenResponse,
   AgentStartSessionRequest,
   AgentStartSessionResponse,
+  AgentWorkspaceSelectResponse,
   AuditLogQueryRequest,
   AuditLogRow,
   AuthStartLoginFlowRequest,
@@ -35,8 +36,14 @@ import type {
   CCStatus,
   ConnectorActionResult,
   ConnectorStatusResponse,
+  HermesInteractionRequest,
+  HermesInteractionResponse,
+  HermesOAuthStartRequest,
+  HermesOAuthStartResponse,
+  HermesRuntimeInstallProgress,
   InstallerRunCcInstallResponse,
   InstallerSupportsAutoInstallResponse,
+  PtyAttachRequest,
   PtyDataEvent,
   PtyExitEvent,
   PtyKillRequest,
@@ -100,10 +107,23 @@ const api = {
     runCcInstall(): Promise<InstallerRunCcInstallResponse> {
       return ipcRenderer.invoke(IpcChannels.InstallerRunCcInstall);
     },
+    onHermesRuntimeInstallProgress(
+      handler: (progress: HermesRuntimeInstallProgress) => void,
+    ): () => void {
+      const listener = (_event: unknown, progress: HermesRuntimeInstallProgress): void =>
+        handler(progress);
+      ipcRenderer.on(IpcChannels.HermesRuntimeInstallProgress, listener);
+      return () => {
+        ipcRenderer.removeListener(IpcChannels.HermesRuntimeInstallProgress, listener);
+      };
+    },
   },
   pty: {
     spawn(req: PtySpawnRequest): Promise<PtySpawnResponse> {
       return ipcRenderer.invoke(IpcChannels.PtySpawn, req);
+    },
+    attach(req: PtyAttachRequest): Promise<void> {
+      return ipcRenderer.invoke(IpcChannels.PtyAttach, req);
     },
     write(req: PtyWriteRequest): Promise<void> {
       return ipcRenderer.invoke(IpcChannels.PtyWrite, req);
@@ -141,6 +161,9 @@ const api = {
     startLoginFlow(req: AuthStartLoginFlowRequest): Promise<AuthStartLoginFlowResponse> {
       return ipcRenderer.invoke(IpcChannels.AuthStartLoginFlow, req);
     },
+    startHermesOAuth(req: HermesOAuthStartRequest): Promise<HermesOAuthStartResponse> {
+      return ipcRenderer.invoke(IpcChannels.AuthStartHermesOAuth, req);
+    },
   },
   shell: {
     openExternal(req: ShellOpenExternalRequest): Promise<void> {
@@ -163,6 +186,9 @@ const api = {
   // 自建 agent loop（M0 spike）。send 是 fire-and-forget：invoke 立即返回，
   // 文本/工具/usage/result 全部经 onEvent 订阅的 agent:event 流推回。
   agent: {
+    selectWorkspace(): Promise<AgentWorkspaceSelectResponse> {
+      return ipcRenderer.invoke(IpcChannels.AgentWorkspaceSelect);
+    },
     startSession(req: AgentStartSessionRequest): Promise<AgentStartSessionResponse> {
       return ipcRenderer.invoke(IpcChannels.AgentStartSession, req);
     },
@@ -179,21 +205,31 @@ const api = {
         ipcRenderer.removeListener(IpcChannels.AgentEvent, listener);
       };
     },
+    onHermesInteraction(handler: (request: HermesInteractionRequest) => void): () => void {
+      const listener = (_event: unknown, request: HermesInteractionRequest): void =>
+        handler(request);
+      ipcRenderer.on(IpcChannels.AgentHermesInteractionRequest, listener);
+      return () => {
+        ipcRenderer.removeListener(IpcChannels.AgentHermesInteractionRequest, listener);
+      };
+    },
+    respondHermesInteraction(response: HermesInteractionResponse): Promise<boolean> {
+      return ipcRenderer.invoke(IpcChannels.AgentHermesInteractionResponse, response);
+    },
     listProfiles(): Promise<ProviderProfile[]> {
       return ipcRenderer.invoke(IpcChannels.AgentProfilesList);
     },
-    saveProfile(profile: ProviderProfile): Promise<ProviderProfile> {
-      return ipcRenderer.invoke(IpcChannels.AgentProfilesSave, { profile });
+    saveProfile(
+      profile: ProviderProfile,
+      credential?: AgentProfileCredential,
+    ): Promise<ProviderProfile> {
+      return ipcRenderer.invoke(IpcChannels.AgentProfilesSave, {
+        profile,
+        ...(credential ? { credential } : {}),
+      });
     },
     deleteProfile(req: AgentProfileDeleteRequest): Promise<void> {
       return ipcRenderer.invoke(IpcChannels.AgentProfilesDelete, req);
-    },
-    // secret 单向进 main（safeStorage 加密落库），无 get 通道——renderer 永远读不回明文
-    setCredential(req: AgentCredentialSetRequest): Promise<void> {
-      return ipcRenderer.invoke(IpcChannels.AgentCredentialsSet, req);
-    },
-    deleteCredential(req: AgentCredentialDeleteRequest): Promise<void> {
-      return ipcRenderer.invoke(IpcChannels.AgentCredentialsDelete, req);
     },
     // 会话历史（侧栏「任务」）
     listSessions(): Promise<AgentSessionMeta[]> {
@@ -201,6 +237,9 @@ const api = {
     },
     loadSession(sessionId: string): Promise<unknown[]> {
       return ipcRenderer.invoke(IpcChannels.AgentSessionLoad, { sessionId });
+    },
+    openSession(sessionId: string): Promise<AgentSessionOpenResponse> {
+      return ipcRenderer.invoke(IpcChannels.AgentSessionOpen, { sessionId });
     },
   },
   // bb-browser 选品连接器（M0.5）：预检 + 启用站点 + 一键动作

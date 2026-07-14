@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""Contract tests for the OpenTrad-owned Hermes launcher pre-import boundary."""
+"""Contract tests for OpenTrad's thin native Hermes bootstrap."""
 
 from __future__ import annotations
 
-import ast
-import io
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
-import shutil
-import socket
+import stat
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 import types
 import unittest
 from unittest import mock
@@ -28,2602 +24,1270 @@ LAUNCHER = (
     / "opentrad_hermes_launcher.py"
 )
 CANARY = "canary-secret-never-print-0123456789"
-STORED_SESSION_ID = "20260711_120000_abcdef"
-LIVE_SESSION_ID = "deadbeef"
-REAL_SMOKE_PYTHON = os.environ.get("OPENTRAD_TEST_HERMES_PYTHON")
 
 
 def load_launcher() -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location("opentrad_hermes_launcher", LAUNCHER)
+    name = "opentrad_hermes_native_launcher_tested"
+    spec = importlib.util.spec_from_file_location(name, LAUNCHER)
     if spec is None or spec.loader is None:
         raise AssertionError("launcher module could not be loaded")
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
 
-def valid_capability(**overrides: object) -> bytes:
+def valid_payload(**overrides: object) -> bytes:
     payload: dict[str, object] = {
         "v": 1,
-        "expiresAt": int(time.time()) + 30,
-        "token": CANARY,
-        "model": "openai/gpt-5.2",
+        "profileId": "profile-deepseek",
+        "providerSlug": "deepseek",
+        "authMode": "api_key",
         "apiMode": "chat_completions",
-        "brokerPort": 43117,
+        "executionBackend": "local",
+        "model": "deepseek-chat",
+        "apiKey": CANARY,
+        "baseUrl": "https://api.deepseek.com/v1",
     }
     payload.update(overrides)
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
-def find_supported_test_python() -> str | None:
-    override = os.environ.get("OPENTRAD_TEST_PYTHON")
-    candidates = (
-        [override]
-        if override
-        else [
-            shutil.which("python3.13"),
-            shutil.which("python3.12"),
-            shutil.which("python3.11"),
-        ]
-    )
-    for candidate in candidates:
-        if not candidate:
-            continue
-        result = subprocess.run(
-            [candidate, "-I", "-S", "-c", "import sys; print(sys.version_info[:2])"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip() in {
-            "(3, 11)",
-            "(3, 12)",
-            "(3, 13)",
-        }:
-            return candidate
-    return None
+def valid_skills_sync_result(**overrides: object) -> dict[str, object]:
+    result: dict[str, object] = {
+        "copied": [f"skill-{index}" for index in range(72)],
+        "updated": [],
+        "skipped": 0,
+        "user_modified": [],
+        "suppressed": [],
+        "total_bundled": 72,
+    }
+    result.update(overrides)
+    return result
 
 
-def rpc_line(
-    method: str,
-    *,
-    request_id: object = 1,
-    params: dict[str, object] | None = None,
-) -> bytes:
-    if params is None:
-        params = {
-            "session.create": {},
-            "session.resume": {"session_id": STORED_SESSION_ID},
-            "session.status": {"session_id": LIVE_SESSION_ID},
-            "session.close": {"session_id": LIVE_SESSION_ID},
-            "session.interrupt": {"session_id": LIVE_SESSION_ID},
-            "prompt.submit": {"session_id": LIVE_SESSION_ID, "text": "continue"},
-            "approval.respond": {"session_id": LIVE_SESSION_ID, "choice": "once"},
-        }.get(method, {})
-    return (
-        json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": method,
-                "params": params,
-            },
-            separators=(",", ":"),
-        ).encode("utf-8")
-        + b"\n"
-    )
-
-
-class CapabilityParsingTests(unittest.TestCase):
+class PayloadContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.launcher = load_launcher()
 
-    def assert_refused(self, raw: bytes, *, now: int | None = None) -> None:
+    def assert_refused(self, raw: bytes) -> None:
         with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-            self.launcher.parse_capability(raw, now=now or int(time.time()))
-        rendered = " ".join((str(caught.exception), repr(caught.exception)))
+            self.launcher.parse_bootstrap_payload(raw)
+        rendered = f"{caught.exception!s} {caught.exception!r}"
+        self.assertEqual(str(caught.exception), self.launcher.GENERIC_REFUSAL)
         self.assertNotIn(CANARY, rendered)
 
-    def test_accepts_the_closed_capability_schema(self) -> None:
-        now = int(time.time())
-        capability = self.launcher.parse_capability(
-            valid_capability(expiresAt=now + 30), now=now
+    def test_accepts_api_key_profile_without_exposing_secret_in_repr(self) -> None:
+        payload = self.launcher.parse_bootstrap_payload(valid_payload())
+
+        self.assertEqual(payload.profile_id, "profile-deepseek")
+        self.assertEqual(payload.provider_slug, "deepseek")
+        self.assertEqual(payload.auth_mode, "api_key")
+        self.assertEqual(payload.api_mode, "chat_completions")
+        self.assertEqual(payload.execution_backend, "local")
+        self.assertEqual(payload.model, "deepseek-chat")
+        self.assertEqual(payload.api_key, CANARY)
+        self.assertEqual(payload.base_url, "https://api.deepseek.com/v1")
+        self.assertNotIn(CANARY, repr(payload))
+
+    def test_accepts_oauth_profile_only_without_api_key_or_base_url(self) -> None:
+        payload = self.launcher.parse_bootstrap_payload(
+            valid_payload(
+                profileId="profile-chatgpt",
+                providerSlug="openai-codex",
+                authMode="oauth",
+                apiMode="codex_responses",
+                model="gpt-5.2-codex",
+                apiKey=None,
+                baseUrl=None,
+            )
         )
 
-        self.assertEqual(capability.model, "openai/gpt-5.2")
-        self.assertEqual(capability.api_mode, "chat_completions")
-        self.assertEqual(capability.broker_port, 43117)
-        self.assertEqual(capability.expires_at, now + 30)
-        self.assertEqual(capability.token, CANARY)
-        self.assertEqual(capability.broker_url, "http://127.0.0.1:43117/v1")
-        self.assertNotIn(CANARY, repr(capability))
+        self.assertEqual(payload.auth_mode, "oauth")
+        self.assertIsNone(payload.api_key)
+        self.assertIsNone(payload.base_url)
 
-    def test_accepts_only_the_two_broker_protocol_modes(self) -> None:
-        now = int(time.time())
-        for mode in ("chat_completions", "codex_responses"):
-            with self.subTest(mode=mode):
-                capability = self.launcher.parse_capability(
-                    valid_capability(apiMode=mode, expiresAt=now + 30),
-                    now=now,
-                )
-                self.assertEqual(capability.api_mode, mode)
-
-    def test_rejects_duplicate_keys(self) -> None:
-        now = int(time.time())
-        raw = (
-            '{"v":1,"expiresAt":%d,"token":"%s","token":"%s",'
-            '"model":"gpt-5.2","apiMode":"chat_completions","brokerPort":43117}'
-            % (now + 30, CANARY, CANARY)
-        ).encode()
-        self.assert_refused(raw, now=now)
-
-    def test_rejects_unknown_and_missing_fields(self) -> None:
-        now = int(time.time())
-        self.assert_refused(
-            valid_capability(extra="not-allowed", expiresAt=now + 30), now=now
+    def test_rejects_duplicate_unknown_and_missing_fields(self) -> None:
+        duplicate = valid_payload().decode("utf-8").replace(
+            '"profileId":"profile-deepseek"',
+            '"profileId":"profile-deepseek","profileId":"shadow"',
         )
-        payload = json.loads(valid_capability(expiresAt=now + 30))
-        del payload["model"]
-        self.assert_refused(json.dumps(payload).encode(), now=now)
+        self.assert_refused(duplicate.encode("utf-8"))
+        self.assert_refused(valid_payload(extra="not-allowed"))
+        missing = json.loads(valid_payload())
+        del missing["providerSlug"]
+        self.assert_refused(json.dumps(missing).encode("utf-8"))
 
-    def test_requires_integer_version_one(self) -> None:
-        now = int(time.time())
-        for version in (0, 2, True, "1"):
-            with self.subTest(version=version):
-                self.assert_refused(
-                    valid_capability(v=version, expiresAt=now + 30), now=now
-                )
+    def test_rejects_invalid_scalar_fields(self) -> None:
+        invalid_cases = (
+            {"v": 2},
+            {"v": True},
+            {"profileId": ""},
+            {"profileId": "bad/profile"},
+            {"providerSlug": ""},
+            {"providerSlug": "bad provider"},
+            {"authMode": "token"},
+            {"apiMode": "responses"},
+            {"executionBackend": "remote"},
+            {"model": ""},
+            {"model": "bad model"},
+        )
+        for overrides in invalid_cases:
+            with self.subTest(overrides=overrides):
+                self.assert_refused(valid_payload(**overrides))
 
-    def test_rejects_expired_or_long_lived_capabilities(self) -> None:
-        now = int(time.time())
-        for expiry in (now, now - 1, now + 301, True, float(now + 30)):
-            with self.subTest(expiry=expiry):
-                self.assert_refused(valid_capability(expiresAt=expiry), now=now)
+    def test_requires_exactly_one_auth_shape(self) -> None:
+        self.assert_refused(valid_payload(apiKey=None))
+        self.assert_refused(valid_payload(apiKey=""))
+        self.assert_refused(valid_payload(apiKey=f"prefix\n{CANARY}"))
+        self.assert_refused(valid_payload(apiKey=f"prefix\x00{CANARY}"))
+        self.assert_refused(valid_payload(authMode="oauth"))
+        self.assert_refused(valid_payload(authMode="oauth", apiKey=None, baseUrl="https://x.test/v1"))
 
-    def test_rejects_invalid_ports(self) -> None:
-        now = int(time.time())
-        for port in (0, 65536, -1, True, "43117"):
-            with self.subTest(port=port):
-                self.assert_refused(
-                    valid_capability(brokerPort=port, expiresAt=now + 30),
-                    now=now,
-                )
-
-    def test_rejects_invalid_tokens_without_rendering_them(self) -> None:
-        now = int(time.time())
-        for token in (
-            "",
-            "a" * 31,
-            "a" * 513,
-            f" {CANARY}",
-            f"{CANARY}\n",
-            f"{CANARY}.dot",
-            f"{CANARY}/slash",
-            f"{CANARY}=padding",
-            1234,
-            "雪" * 32,
+    def test_accepts_https_and_loopback_http_base_urls_only(self) -> None:
+        for value in (
+            "https://example.test/v1",
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://[::1]:9000/v1",
         ):
-            with self.subTest(token_type=type(token).__name__):
-                self.assert_refused(
-                    valid_capability(token=token, expiresAt=now + 30), now=now
-                )
+            with self.subTest(value=value):
+                parsed = self.launcher.parse_bootstrap_payload(valid_payload(baseUrl=value))
+                self.assertEqual(parsed.base_url, value)
 
-    def test_rejects_invalid_models(self) -> None:
-        now = int(time.time())
-        for model in ("", "bad model", "/starts-with-slash", "a" * 129, 1234):
-            with self.subTest(model=model):
-                self.assert_refused(
-                    valid_capability(model=model, expiresAt=now + 30), now=now
-                )
+        for value in (
+            "http://example.test/v1",
+            "https://user:pass@example.test/v1",
+            "https://example.test/v1?token=secret",
+            "file:///tmp/socket",
+            "not-a-url",
+        ):
+            with self.subTest(value=value):
+                self.assert_refused(valid_payload(baseUrl=value))
 
-    def test_rejects_invalid_api_modes(self) -> None:
-        now = int(time.time())
-        for api_mode in ("", "anthropic_messages", "CHAT_COMPLETIONS", 1234):
-            with self.subTest(api_mode=api_mode):
-                self.assert_refused(
-                    valid_capability(apiMode=api_mode, expiresAt=now + 30),
-                    now=now,
-                )
-
-    def test_rejects_malformed_or_non_utf8_input_without_echoing_it(self) -> None:
-        self.assert_refused(b"\xff\xfe" + CANARY.encode())
-        self.assert_refused(b"{" + CANARY.encode())
+    def test_rejects_oversized_or_non_utf8_payloads_without_reflection(self) -> None:
+        self.assert_refused(b"x" * (self.launcher.BOOTSTRAP_MAX_BYTES + 1))
+        self.assert_refused(b"\xff\xfe" + CANARY.encode("ascii"))
 
 
-class CapabilityFdTests(unittest.TestCase):
+class PayloadFdTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.launcher = load_launcher()
 
-    def test_reads_to_eof_then_closes_and_makes_fd_non_inheritable(self) -> None:
+    def test_reads_exactly_one_bounded_payload_and_closes_fd(self) -> None:
         read_fd, write_fd = os.pipe()
-        os.set_inheritable(read_fd, True)
-        os.write(write_fd, valid_capability())
+        os.write(write_fd, valid_payload())
         os.close(write_fd)
 
-        capability = self.launcher.read_capability_fd(read_fd, timeout_seconds=0.2)
+        payload = self.launcher.read_bootstrap_fd(read_fd, timeout_seconds=0.2)
 
-        self.assertEqual(capability.token, CANARY)
+        self.assertEqual(payload.provider_slug, "deepseek")
         with self.assertRaises(OSError):
             os.fstat(read_fd)
 
-    def test_rejects_a_missing_fd(self) -> None:
+    def test_closes_fd_on_parse_failure(self) -> None:
         read_fd, write_fd = os.pipe()
-        os.close(read_fd)
+        os.write(write_fd, b"not-json")
         os.close(write_fd)
-        with self.assertRaises(self.launcher.LauncherRefusal):
-            self.launcher.read_capability_fd(read_fd, timeout_seconds=0.02)
 
-    def test_rejects_more_than_4096_bytes(self) -> None:
-        read_fd, write_fd = os.pipe()
-        os.write(write_fd, b"x" * 4097)
-        os.close(write_fd)
         with self.assertRaises(self.launcher.LauncherRefusal):
-            self.launcher.read_capability_fd(read_fd, timeout_seconds=0.2)
+            self.launcher.read_bootstrap_fd(read_fd, timeout_seconds=0.2)
 
-    def test_rejects_a_writer_that_does_not_send_eof(self) -> None:
+        with self.assertRaises(OSError):
+            os.fstat(read_fd)
+
+    def test_refuses_timeout_missing_eof_and_oversized_payload(self) -> None:
         read_fd, write_fd = os.pipe()
-        os.write(write_fd, valid_capability())
-        started = time.monotonic()
         try:
             with self.assertRaises(self.launcher.LauncherRefusal):
-                self.launcher.read_capability_fd(read_fd, timeout_seconds=0.03)
+                self.launcher.read_bootstrap_fd(read_fd, timeout_seconds=0.01)
         finally:
             os.close(write_fd)
-        self.assertLess(time.monotonic() - started, 0.5)
 
-    def test_fd_errors_never_render_the_capability_token(self) -> None:
         read_fd, write_fd = os.pipe()
-        os.write(write_fd, valid_capability() + b"x" * 4097)
+        try:
+            os.write(write_fd, valid_payload())
+            with self.assertRaises(self.launcher.LauncherRefusal):
+                self.launcher.read_bootstrap_fd(read_fd, timeout_seconds=0.01)
+        finally:
+            os.close(write_fd)
+
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b"x" * (self.launcher.BOOTSTRAP_MAX_BYTES + 1))
         os.close(write_fd)
-        with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-            self.launcher.read_capability_fd(read_fd, timeout_seconds=0.2)
-        self.assertNotIn(CANARY, str(caught.exception))
-        self.assertNotIn(CANARY, repr(caught.exception))
+        with self.assertRaises(self.launcher.LauncherRefusal):
+            self.launcher.read_bootstrap_fd(read_fd, timeout_seconds=0.2)
 
 
-class EnvironmentAndDiagnosticsTests(unittest.TestCase):
+class EnvironmentTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.launcher = load_launcher()
 
-    def test_private_environment_redirects_home_and_tmp_and_scrubs_inherited_secrets(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            hermes_home = root / "hermes"
-            hermes_home.mkdir(mode=0o700)
-            environment = {
-                "PATH": "/usr/bin:/bin",
-                "LANG": "en_US.UTF-8",
-                "HTTP_PROXY": "http://attacker.invalid",
-                "https_proxy": "http://attacker.invalid",
-                "NO_PROXY": "*",
-                "OPENAI_API_KEY": CANARY,
-                "ANTHROPIC_AUTH_TOKEN": CANARY,
-                "SSL_CERT_FILE": "/tmp/attacker.pem",
-                "REQUESTS_CA_BUNDLE": "/tmp/attacker.pem",
-                "PYTHONPATH": "/tmp/attacker",
-                "PYTHONSTARTUP": "/tmp/attacker.py",
-                "DYLD_INSERT_LIBRARIES": "/tmp/attacker.dylib",
-                "HERMES_CONFIG": "/tmp/attacker.yaml",
-                "HERMES_TUI_TOOLSETS": "all",
-                "HERMES_SAFE_MODE": "0",
-            }
-            original_umask = os.umask(0o022)
-            try:
-                directories = self.launcher.prepare_private_environment(
-                    hermes_home,
-                    environment,
-                )
-                current_umask = os.umask(original_umask)
-            finally:
-                os.umask(original_umask)
+    def base_environment(self, home: Path) -> dict[str, str]:
+        (home / "gh-config").mkdir(mode=0o700, exist_ok=True)
+        (home / "xdg-config").mkdir(mode=0o700, exist_ok=True)
+        (home / "codex-home").mkdir(mode=0o700, exist_ok=True)
+        return {
+            "HERMES_HOME": str(home),
+            "HERMES_BUNDLED_SKILLS": str(home.resolve()),
+            "OPENTRAD_WORKSPACE_ROOT": str(home.resolve()),
+            "HOME": "/Users/example",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "TMPDIR": "/private/tmp/",
+            "LANG": "en_US.UTF-8",
+            "LC_CTYPE": "UTF-8",
+            "PYTHONPATH": "/attacker",
+            "PYTHONHOME": "/attacker",
+            "DYLD_INSERT_LIBRARIES": "/attacker.dylib",
+            "NODE_OPTIONS": "--require=/attacker.js",
+            "HTTPS_PROXY": "http://attacker.invalid:8080",
+            "OPENAI_API_KEY": "inherited-openai-secret",
+            "DEEPSEEK_API_KEY": "inherited-deepseek-secret",
+            "ANTHROPIC_API_KEY": "inherited-anthropic-secret",
+            "GH_CONFIG_DIR": "/Users/example/.config/gh",
+            "XDG_CONFIG_HOME": "/Users/example/.config",
+            "COPILOT_GH_HOST": "github.com",
+            "CODEX_HOME": "/Users/example/.codex",
+        }
 
-            self.assertEqual(current_umask, 0o077)
-            self.assertNotIn("PATH", environment)
-            self.assertEqual(environment["LANG"], "en_US.UTF-8")
-            self.assertEqual(environment["HERMES_HOME"], str(hermes_home))
-            self.assertEqual(environment["HOME"], str(directories.home))
-            self.assertEqual(environment["TMPDIR"], str(directories.tmp))
-            self.assertEqual(environment["HERMES_SAFE_MODE"], "1")
-            self.assertEqual(environment["HERMES_IGNORE_USER_CONFIG"], "1")
-            self.assertEqual(environment["HERMES_IGNORE_RULES"], "1")
-            for forbidden in (
-                "HTTP_PROXY",
-                "https_proxy",
-                "NO_PROXY",
-                "OPENAI_API_KEY",
-                "ANTHROPIC_AUTH_TOKEN",
-                "SSL_CERT_FILE",
-                "REQUESTS_CA_BUNDLE",
+    def test_scrubs_inherited_control_and_provider_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            target = self.base_environment(home)
+            payload = self.launcher.parse_bootstrap_payload(valid_payload())
+
+            self.launcher.configure_environment(payload, target)
+
+            self.assertEqual(target["HERMES_HOME"], str(home))
+            self.assertEqual(target["HERMES_BUNDLED_SKILLS"], str(home.resolve()))
+            self.assertEqual(target["GH_CONFIG_DIR"], str(home / "gh-config"))
+            self.assertEqual(target["XDG_CONFIG_HOME"], str(home / "xdg-config"))
+            self.assertRegex(target["COPILOT_GH_HOST"], r"^[a-f0-9]{24}\.opentrad\.invalid$")
+            self.assertEqual(target["CODEX_HOME"], str(home / "codex-home"))
+            self.assertEqual(target["HOME"], "/Users/example")
+            self.assertEqual(target["PATH"], "/usr/local/bin:/usr/bin:/bin")
+            self.assertEqual(target["DEEPSEEK_API_KEY"], CANARY)
+            self.assertEqual(target["DEEPSEEK_BASE_URL"], "https://api.deepseek.com/v1")
+            for key in (
                 "PYTHONPATH",
-                "PYTHONSTARTUP",
+                "PYTHONHOME",
                 "DYLD_INSERT_LIBRARIES",
-                "HERMES_CONFIG",
-                "HERMES_TUI_TOOLSETS",
+                "NODE_OPTIONS",
+                "HTTPS_PROXY",
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "OPENTRAD_WORKSPACE_ROOT",
             ):
-                self.assertNotIn(forbidden, environment)
-            self.assertEqual(directories.home.stat().st_mode & 0o777, 0o700)
-            self.assertEqual(directories.tmp.stat().st_mode & 0o777, 0o700)
+                self.assertNotIn(key, target)
 
-    def test_diagnostics_disable_core_dumps_and_faulthandler_in_a_child(self) -> None:
-        module_path = json.dumps(str(LAUNCHER))
-        code = f"""
-import faulthandler, importlib.util, json, resource, sys
-spec = importlib.util.spec_from_file_location('launcher_diagnostics_child', {module_path})
-module = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = module
-spec.loader.exec_module(module)
-faulthandler.enable()
-module.disable_process_diagnostics()
-print(json.dumps({{'core': resource.getrlimit(resource.RLIMIT_CORE), 'fault': faulthandler.is_enabled()}}))
-"""
-        result = subprocess.run(
-            [sys.executable, "-I", "-S", "-B", "-u", "-X", "utf8", "-c", code],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        observed = json.loads(result.stdout)
-        self.assertEqual(observed["core"], [0, 0])
-        self.assertFalse(observed["fault"])
+    def test_maps_only_private_trusted_proxy_inputs_to_upstream_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            target = self.base_environment(home)
+            target.update(
+                {
+                    "OPENTRAD_NETWORK_HTTP_PROXY": "http://127.0.0.1:7897",
+                    "OPENTRAD_NETWORK_HTTPS_PROXY": "http://127.0.0.1:7897",
+                    "OPENTRAD_NETWORK_NO_PROXY": "localhost,127.0.0.1,::1",
+                    "http_proxy": "http://attacker.invalid:4444",
+                    "https_proxy": "http://attacker.invalid:5555",
+                }
+            )
+            payload = self.launcher.parse_bootstrap_payload(valid_payload())
 
-    def test_private_directory_resolution_runtime_error_is_generic(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            hermes_home = root / "hermes"
-            hermes_home.mkdir(mode=0o700)
-            original_umask = os.umask(0o022)
-            try:
-                with mock.patch.object(
-                    Path,
-                    "resolve",
-                    side_effect=[hermes_home, RuntimeError(CANARY)],
-                ):
+            self.launcher.configure_environment(payload, target)
+
+            self.assertEqual(target["HTTP_PROXY"], "http://127.0.0.1:7897")
+            self.assertEqual(target["HTTPS_PROXY"], "http://127.0.0.1:7897")
+            self.assertEqual(target["NO_PROXY"], "localhost,127.0.0.1,::1")
+            self.assertNotIn("OPENTRAD_NETWORK_HTTP_PROXY", target)
+            self.assertNotIn("OPENTRAD_NETWORK_HTTPS_PROXY", target)
+            self.assertNotIn("OPENTRAD_NETWORK_NO_PROXY", target)
+            self.assertNotIn("http_proxy", target)
+            self.assertNotIn("https_proxy", target)
+
+    def test_rejects_malformed_private_trusted_proxy_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            payload = self.launcher.parse_bootstrap_payload(valid_payload())
+            for value in (
+                "https://127.0.0.1:7897",
+                "http://user:password@127.0.0.1:7897",
+                "http://127.0.0.1:7897/escape",
+                "http://127.0.0.1:0",
+            ):
+                with self.subTest(value=value):
+                    target = self.base_environment(home)
+                    target["OPENTRAD_NETWORK_HTTPS_PROXY"] = value
+                    with self.assertRaises(self.launcher.LauncherRefusal):
+                        self.launcher.configure_environment(payload, target)
+
+    def test_local_backend_fixes_workspace_and_disables_docker_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            target = self.base_environment(Path(raw))
+            payload = self.launcher.parse_bootstrap_payload(valid_payload())
+
+            workspace = self.launcher.configure_environment(payload, target)
+
+            self.assertEqual(workspace, Path(raw).resolve())
+            self.assertEqual(target["TERMINAL_ENV"], "local")
+            self.assertEqual(target["TERMINAL_CWD"], str(workspace))
+            self.assertEqual(target["TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE"], "false")
+            self.assertEqual(target["TERMINAL_CONTAINER_PERSISTENT"], "false")
+            self.assertEqual(target["TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES"], "false")
+            self.assertEqual(target["TERMINAL_DOCKER_VOLUMES"], "[]")
+            self.assertEqual(target["TERMINAL_DOCKER_EXTRA_ARGS"], "[]")
+            self.assertEqual(target["TERMINAL_DOCKER_FORWARD_ENV"], "[]")
+            self.assertEqual(target["TERMINAL_DOCKER_ENV"], "{}")
+
+    def test_docker_backend_uses_only_the_canonical_workspace_mount_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw).resolve()
+            target = self.base_environment(workspace)
+            target.update(
+                {
+                    "TERMINAL_ENV": "ssh",
+                    "TERMINAL_CWD": "/attacker",
+                    "TERMINAL_DOCKER_VOLUMES": '["/attacker:/host"]',
+                    "TERMINAL_DOCKER_EXTRA_ARGS": '["--mount", "attacker"]',
+                    "TERMINAL_DOCKER_FORWARD_ENV": '["DEEPSEEK_API_KEY"]',
+                    "TERMINAL_DOCKER_ENV": '{"LEAK":"secret"}',
+                    "TERMINAL_CONTAINER_PERSISTENT": "true",
+                    "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES": "true",
+                }
+            )
+            payload = self.launcher.parse_bootstrap_payload(
+                valid_payload(executionBackend="docker")
+            )
+
+            selected = self.launcher.configure_environment(payload, target)
+
+            self.assertEqual(selected, workspace)
+            self.assertEqual(target["TERMINAL_ENV"], "docker")
+            self.assertEqual(target["TERMINAL_CWD"], str(workspace))
+            self.assertEqual(target["TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE"], "true")
+            self.assertEqual(target["TERMINAL_DOCKER_RUN_AS_HOST_USER"], "true")
+            self.assertEqual(target["TERMINAL_CONTAINER_PERSISTENT"], "false")
+            self.assertEqual(target["TERMINAL_DOCKER_VOLUMES"], "[]")
+            self.assertEqual(target["TERMINAL_DOCKER_EXTRA_ARGS"], "[]")
+            self.assertEqual(target["TERMINAL_DOCKER_FORWARD_ENV"], "[]")
+            self.assertEqual(target["TERMINAL_DOCKER_ENV"], "{}")
+            self.assertEqual(target["TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES"], "false")
+            self.assertNotIn("OPENTRAD_WORKSPACE_ROOT", target)
+
+    def test_rejects_missing_relative_nonexistent_or_symlinked_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            real = root / "real"
+            real.mkdir()
+            linked = root / "linked"
+            linked.symlink_to(real, target_is_directory=True)
+            candidates: tuple[str | None, ...] = (
+                None,
+                "relative/workspace",
+                str(root / "missing"),
+                str(linked),
+            )
+            payload = self.launcher.parse_bootstrap_payload(valid_payload())
+            for value in candidates:
+                with self.subTest(value=value):
+                    target = self.base_environment(root)
+                    if value is None:
+                        target.pop("OPENTRAD_WORKSPACE_ROOT")
+                    else:
+                        target["OPENTRAD_WORKSPACE_ROOT"] = value
                     with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-                        self.launcher.prepare_private_environment(hermes_home, {})
-            finally:
-                os.umask(original_umask)
+                        self.launcher.configure_environment(payload, target)
+                    self.assertEqual(str(caught.exception), self.launcher.GENERIC_REFUSAL)
+                    self.assertNotIn(CANARY, repr(caught.exception))
 
-            self.assertNotIn(CANARY, str(caught.exception))
+    def test_docker_contract_is_restored_after_profile_config_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw).resolve()
+            target = self.base_environment(workspace)
+            payload = self.launcher.parse_bootstrap_payload(
+                valid_payload(executionBackend="docker")
+            )
+            self.launcher.configure_environment(payload, target)
+
+            def upstream_bridge(**_kwargs: object) -> dict[str, str]:
+                target.update(
+                    {
+                        "TERMINAL_ENV": "local",
+                        "TERMINAL_CWD": "/attacker",
+                        "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE": "false",
+                        "TERMINAL_DOCKER_RUN_AS_HOST_USER": "false",
+                        "TERMINAL_DOCKER_VOLUMES": '["/attacker:/host"]',
+                        "TERMINAL_DOCKER_FORWARD_ENV": '["DEEPSEEK_API_KEY"]',
+                        "TERMINAL_DOCKER_ENV": '{"LEAK":"secret"}',
+                        "TERMINAL_CONTAINER_PERSISTENT": "true",
+                        "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES": "true",
+                    }
+                )
+                return target
+
+            module = types.SimpleNamespace(apply_terminal_config_to_env=upstream_bridge)
+            self.launcher.install_execution_environment_guard(
+                payload, workspace, module, target
+            )
+
+            result = module.apply_terminal_config_to_env(config={"terminal": {}})
+
+            self.assertIs(result, target)
+            self.assertEqual(target["TERMINAL_ENV"], "docker")
+            self.assertEqual(target["TERMINAL_CWD"], str(workspace))
+            self.assertEqual(target["TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE"], "true")
+            self.assertEqual(target["TERMINAL_DOCKER_RUN_AS_HOST_USER"], "true")
+            self.assertEqual(target["TERMINAL_CONTAINER_PERSISTENT"], "false")
+            self.assertEqual(target["TERMINAL_DOCKER_VOLUMES"], "[]")
+            self.assertEqual(target["TERMINAL_DOCKER_EXTRA_ARGS"], "[]")
+            self.assertEqual(target["TERMINAL_DOCKER_FORWARD_ENV"], "[]")
+            self.assertEqual(target["TERMINAL_DOCKER_ENV"], "{}")
+            self.assertEqual(target["TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES"], "false")
+
+    def test_maps_api_keys_to_the_pinned_hermes_provider_environment(self) -> None:
+        cases = (
+            ("openai-api", "codex_responses", "OPENAI_API_KEY", "OPENAI_BASE_URL"),
+            ("anthropic", "chat_completions", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"),
+            ("deepseek", "chat_completions", "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"),
+            (
+                "custom:profile-compatible",
+                "chat_completions",
+                "OPENTRAD_PROVIDER_API_KEY",
+                "OPENTRAD_PROVIDER_BASE_URL",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            for slug, api_mode, key_name, base_name in cases:
+                with self.subTest(slug=slug):
+                    target = self.base_environment(Path(raw))
+                    payload = self.launcher.parse_bootstrap_payload(
+                        valid_payload(providerSlug=slug, apiMode=api_mode)
+                    )
+                    self.launcher.configure_environment(payload, target)
+                    self.assertEqual(target[key_name], CANARY)
+                    self.assertEqual(target[base_name], "https://api.deepseek.com/v1")
+
+    def test_oauth_profile_never_injects_an_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            target = self.base_environment(Path(raw))
+            payload = self.launcher.parse_bootstrap_payload(
+                valid_payload(
+                    providerSlug="openai-codex",
+                    authMode="oauth",
+                    apiMode="codex_responses",
+                    apiKey=None,
+                    baseUrl=None,
+                )
+            )
+
+            self.launcher.configure_environment(payload, target)
+
+            self.assertFalse(any(key.endswith("API_KEY") for key in target))
+            self.assertNotIn(CANARY, repr(target))
+
+    def test_fd_key_is_restored_after_every_upstream_dotenv_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            target = self.base_environment(Path(raw))
+            target.update(
+                {
+                    "OPENTRAD_NETWORK_HTTPS_PROXY": "http://127.0.0.1:7897",
+                    "OPENTRAD_NETWORK_NO_PROXY": "localhost,127.0.0.1,::1",
+                }
+            )
+            payload = self.launcher.parse_bootstrap_payload(valid_payload())
+            self.launcher.configure_environment(payload, target)
+            env_file = Path(raw) / ".env"
+            env_file.write_text("DEEPSEEK_API_KEY=stale-profile-key\n", encoding="utf-8")
+
+            def upstream_loader(*_args: object, **_kwargs: object) -> list[Path]:
+                target["DEEPSEEK_API_KEY"] = "stale-profile-key"
+                target["HERMES_BUNDLED_SKILLS"] = "/attacker/skills"
+                target["HERMES_HOME"] = "/attacker/home"
+                target["HOME"] = "/attacker/home-alias"
+                target["PATH"] = "/attacker/bin"
+                target["GH_CONFIG_DIR"] = "/attacker/gh"
+                target["XDG_CONFIG_HOME"] = "/attacker/xdg"
+                target["COPILOT_GH_HOST"] = "github.com"
+                target["CODEX_HOME"] = "/attacker/codex"
+                target["HERMES_PROFILE"] = "shared-host-profile"
+                target["HERMES_CONFIG"] = "/attacker/config.yaml"
+                target["HERMES_ENV"] = "/attacker/.env"
+                target["PYTHONPATH"] = "/attacker/python"
+                target["DYLD_INSERT_LIBRARIES"] = "/attacker/inject.dylib"
+                target["NODE_OPTIONS"] = "--require=/attacker.js"
+                target["HTTPS_PROXY"] = "http://attacker.invalid:4444"
+                target["https_proxy"] = "http://attacker.invalid:5555"
+                target["NO_PROXY"] = "attacker.invalid"
+                target["SSL_CERT_FILE"] = "/attacker/ca.pem"
+                target["SSL_CERT_DIR"] = "/attacker/ca-dir"
+                target["REQUESTS_CA_BUNDLE"] = "/attacker/requests-ca.pem"
+                target["CURL_CA_BUNDLE"] = "/attacker/curl-ca.pem"
+                target["NODE_EXTRA_CA_CERTS"] = "/attacker/node-ca.pem"
+                target["OPENSSL_CONF"] = "/attacker/openssl.cnf"
+                target["SSLKEYLOGFILE"] = "/attacker/tls-keys.log"
+                target["COPILOT_API_BASE_URL"] = "https://attacker.invalid/copilot"
+                target["NOUS_PORTAL_BASE_URL"] = "https://attacker.invalid/oauth"
+                target["NOUS_INFERENCE_BASE_URL"] = "https://attacker.invalid/inference"
+                target["TERMINAL_DOCKER_IMAGE"] = "attacker/image"
+                target["DOCKER_HOST"] = "tcp://attacker.invalid:2375"
+                target["HERMES_LANGFUSE_SECRET_KEY"] = "profile-observability-secret"
+                target["NODE_AUTH_TOKEN"] = "profile-registry-secret"
+                target["TOOL_SKILL_SECRET"] = "profile-tool-secret"
+                target["TERMINAL_ENV"] = "docker"
+                target["TERMINAL_CWD"] = "/attacker/workspace"
+                return [env_file]
+
+            module = types.SimpleNamespace(load_hermes_dotenv=upstream_loader)
+            self.launcher.install_provider_environment_guard(
+                payload,
+                module,
+                target,
+                workspace_root=Path(raw).resolve(),
+                bundled_skills_root=Path(raw).resolve(),
+            )
+
+            first = module.load_hermes_dotenv(hermes_home=raw)
+            second = module.load_hermes_dotenv(hermes_home=raw)
+
+            self.assertEqual(first, [env_file])
+            self.assertEqual(second, [env_file])
+            self.assertEqual(target["DEEPSEEK_API_KEY"], CANARY)
+            self.assertEqual(target["HERMES_BUNDLED_SKILLS"], str(Path(raw).resolve()))
+            self.assertEqual(target["HERMES_HOME"], str(Path(raw)))
+            self.assertEqual(target["GH_CONFIG_DIR"], str(Path(raw) / "gh-config"))
+            self.assertEqual(target["XDG_CONFIG_HOME"], str(Path(raw) / "xdg-config"))
+            self.assertRegex(target["COPILOT_GH_HOST"], r"^[a-f0-9]{24}\.opentrad\.invalid$")
+            self.assertEqual(target["CODEX_HOME"], str(Path(raw) / "codex-home"))
+            self.assertEqual(target["HOME"], "/Users/example")
+            self.assertEqual(target["PATH"], "/usr/local/bin:/usr/bin:/bin")
+            self.assertEqual(target["HTTPS_PROXY"], "http://127.0.0.1:7897")
+            self.assertEqual(target["NO_PROXY"], "localhost,127.0.0.1,::1")
+            self.assertNotIn("https_proxy", target)
+            self.assertEqual(target["TOOL_SKILL_SECRET"], "profile-tool-secret")
+            self.assertEqual(
+                target["HERMES_LANGFUSE_SECRET_KEY"], "profile-observability-secret"
+            )
+            self.assertEqual(target["NODE_AUTH_TOKEN"], "profile-registry-secret")
+            for forbidden in (
+                "HERMES_PROFILE",
+                "HERMES_CONFIG",
+                "HERMES_ENV",
+                "PYTHONPATH",
+                "DYLD_INSERT_LIBRARIES",
+                "NODE_OPTIONS",
+                "SSL_CERT_FILE",
+                "SSL_CERT_DIR",
+                "REQUESTS_CA_BUNDLE",
+                "CURL_CA_BUNDLE",
+                "NODE_EXTRA_CA_CERTS",
+                "OPENSSL_CONF",
+                "SSLKEYLOGFILE",
+                "COPILOT_API_BASE_URL",
+                "NOUS_PORTAL_BASE_URL",
+                "NOUS_INFERENCE_BASE_URL",
+                "TERMINAL_DOCKER_IMAGE",
+                "DOCKER_HOST",
+            ):
+                self.assertNotIn(forbidden, target)
+            self.assertEqual(target["TERMINAL_ENV"], "local")
+            self.assertEqual(target["TERMINAL_CWD"], str(Path(raw).resolve()))
+            self.assertEqual(
+                env_file.read_text(encoding="utf-8"),
+                "DEEPSEEK_API_KEY=stale-profile-key\n",
+            )
+
+    def test_docker_contract_is_restored_after_every_upstream_dotenv_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw).resolve()
+            target = self.base_environment(workspace)
+            payload = self.launcher.parse_bootstrap_payload(
+                valid_payload(executionBackend="docker")
+            )
+            self.launcher.configure_environment(payload, target)
+
+            def upstream_loader(**_kwargs: object) -> list[Path]:
+                target.update(
+                    {
+                        "TERMINAL_ENV": "local",
+                        "TERMINAL_CWD": "/attacker",
+                        "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE": "false",
+                        "TERMINAL_DOCKER_RUN_AS_HOST_USER": "false",
+                        "TERMINAL_DOCKER_VOLUMES": '["/attacker:/host"]',
+                        "TERMINAL_DOCKER_FORWARD_ENV": '["DEEPSEEK_API_KEY"]',
+                        "TERMINAL_DOCKER_ENV": '{"LEAK":"secret"}',
+                        "TERMINAL_CONTAINER_PERSISTENT": "true",
+                        "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES": "true",
+                    }
+                )
+                return []
+
+            module = types.SimpleNamespace(load_hermes_dotenv=upstream_loader)
+            self.launcher.install_provider_environment_guard(
+                payload, module, target, workspace_root=workspace
+            )
+
+            module.load_hermes_dotenv(hermes_home=raw)
+
+            self.assertEqual(target["TERMINAL_ENV"], "docker")
+            self.assertEqual(target["TERMINAL_CWD"], str(workspace))
+            self.assertEqual(target["TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE"], "true")
+            self.assertEqual(target["TERMINAL_DOCKER_RUN_AS_HOST_USER"], "true")
+            self.assertEqual(target["TERMINAL_CONTAINER_PERSISTENT"], "false")
+            self.assertEqual(target["TERMINAL_DOCKER_VOLUMES"], "[]")
+            self.assertEqual(target["TERMINAL_DOCKER_EXTRA_ARGS"], "[]")
+            self.assertEqual(target["TERMINAL_DOCKER_FORWARD_ENV"], "[]")
+            self.assertEqual(target["TERMINAL_DOCKER_ENV"], "{}")
+            self.assertEqual(target["TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES"], "false")
+
+    def test_anthropic_dotenv_cannot_cross_the_profile_auth_mode(self) -> None:
+        cases = (
+            ("api_key", CANARY, "ANTHROPIC_TOKEN", "sk-ant-oat01-stale-profile"),
+            ("oauth", None, "ANTHROPIC_API_KEY", "stale-profile-api-key"),
+        )
+        for auth_mode, api_key, forbidden, forbidden_value in cases:
+            with self.subTest(auth_mode=auth_mode), tempfile.TemporaryDirectory() as raw:
+                target = self.base_environment(Path(raw))
+                payload = self.launcher.parse_bootstrap_payload(
+                    valid_payload(
+                        providerSlug="anthropic",
+                        authMode=auth_mode,
+                        apiMode="chat_completions",
+                        apiKey=api_key,
+                        baseUrl=None,
+                    )
+                )
+                self.launcher.configure_environment(payload, target)
+
+                def upstream_loader(**_kwargs: object) -> list[Path]:
+                    target[forbidden] = forbidden_value
+                    target["ANTHROPIC_BASE_URL"] = "https://attacker.invalid/anthropic"
+                    if auth_mode == "oauth":
+                        target["ANTHROPIC_TOKEN"] = "sk-ant-oat01-profile-oauth"
+                    else:
+                        target["CLAUDE_CODE_OAUTH_TOKEN"] = "sk-ant-oat01-stale-claude"
+                    return []
+
+                module = types.SimpleNamespace(load_hermes_dotenv=upstream_loader)
+                self.launcher.install_provider_environment_guard(
+                    payload,
+                    module,
+                    target,
+                    workspace_root=Path(raw).resolve(),
+                    bundled_skills_root=Path(raw).resolve(),
+                )
+
+                module.load_hermes_dotenv(hermes_home=raw)
+
+                self.assertNotIn(forbidden, target)
+                self.assertNotIn("ANTHROPIC_BASE_URL", target)
+                if auth_mode == "api_key":
+                    self.assertEqual(target["ANTHROPIC_API_KEY"], CANARY)
+                    self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", target)
+                else:
+                    self.assertEqual(target["ANTHROPIC_TOKEN"], "sk-ant-oat01-profile-oauth")
 
 
-class PathAndRuntimeTests(unittest.TestCase):
+class BootstrapBoundaryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.launcher = load_launcher()
 
-    def make_paths(self, root: Path) -> tuple[Path, Path, Path]:
-        launcher = root / "launcher.py"
-        launcher.write_text("# launcher\n", encoding="utf-8")
-        launcher.chmod(0o600)
-        hermes_home = root / "hermes"
-        hermes_home.mkdir(mode=0o700)
-        cwd = hermes_home / "gateway-cwd"
+    @staticmethod
+    def make_private_tree(root: Path) -> tuple[Path, Path, Path, Path]:
+        runtime = root / "runtime"
+        python = runtime / "python" / "bin" / "python3"
+        site_packages = runtime / "python" / "lib" / "python3.12" / "site-packages"
+        launcher = root / "app" / "opentrad_hermes_launcher.py"
+        home = root / "profile"
+        cwd = home / "gateway-cwd"
+        python.parent.mkdir(parents=True)
+        site_packages.mkdir(parents=True)
+        launcher.parent.mkdir(parents=True)
+        home.mkdir(mode=0o700)
         cwd.mkdir(mode=0o700)
-        return launcher, hermes_home, cwd
+        python.write_bytes(b"python")
+        launcher.write_bytes(b"launcher")
+        python.chmod(0o700)
+        launcher.chmod(0o600)
+        return python, launcher, home, cwd
 
-    def test_accepts_canonical_private_launcher_home_and_gateway_cwd(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            launcher, hermes_home, cwd = self.make_paths(root)
-            paths = self.launcher.validate_bootstrap_paths(launcher, hermes_home, cwd)
-            self.assertEqual(paths.launcher, launcher)
-            self.assertEqual(paths.hermes_home, hermes_home)
+    def test_requires_exact_managed_cpython_version(self) -> None:
+        self.launcher.verify_interpreter_contract((3, 12, 11))
+        for version in ((3, 12, 10), (3, 12, 12), (3, 11, 9), (3, 13, 0), (3, 14, 0)):
+            with self.subTest(version=version):
+                with self.assertRaises(self.launcher.LauncherRefusal):
+                    self.launcher.verify_interpreter_contract(version)
+
+    def test_validates_private_profile_and_infers_only_managed_site_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            python, launcher, home, cwd = self.make_private_tree(root)
+
+            paths = self.launcher.validate_bootstrap_paths(launcher, home, cwd)
+            site_packages = self.launcher.infer_site_packages(python, (3, 12, 11))
+            sys_path = [str(launcher.parent), "/stdlib", "/attacker"]
+            self.launcher.activate_site_packages(site_packages, sys_path)
+
+            self.assertEqual(paths.hermes_home, home)
             self.assertEqual(paths.cwd, cwd)
-
-    def test_rejects_relative_symlink_or_writable_launcher_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            launcher, hermes_home, cwd = self.make_paths(root)
-            with self.assertRaises(self.launcher.LauncherRefusal):
-                self.launcher.validate_bootstrap_paths(
-                    Path("launcher.py"), hermes_home, cwd
-                )
-            link = root / "launcher-link.py"
-            link.symlink_to(launcher)
-            with self.assertRaises(self.launcher.LauncherRefusal):
-                self.launcher.validate_bootstrap_paths(link, hermes_home, cwd)
-            launcher.chmod(0o622)
-            with self.assertRaises(self.launcher.LauncherRefusal):
-                self.launcher.validate_bootstrap_paths(launcher, hermes_home, cwd)
-
-    def test_symlink_loops_are_generic_launcher_refusals(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            _, hermes_home, cwd = self.make_paths(root)
-            loop = root / f"loop-{CANARY}"
-            loop.symlink_to(loop)
-
-            with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-                self.launcher.validate_bootstrap_paths(loop, hermes_home, cwd)
-
-            self.assertNotIn(CANARY, str(caught.exception))
-
-    def test_runtime_error_from_path_resolution_is_generic(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            launcher, hermes_home, cwd = self.make_paths(root)
-            with mock.patch.object(Path, "resolve", side_effect=RuntimeError(CANARY)):
-                with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-                    self.launcher.validate_bootstrap_paths(launcher, hermes_home, cwd)
-
-            self.assertNotIn(CANARY, str(caught.exception))
-
-    def test_rejects_noncanonical_or_nonprivate_home_and_wrong_cwd(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            launcher, hermes_home, cwd = self.make_paths(root)
-            outside = root / "outside"
-            outside.mkdir(mode=0o700)
-            with self.assertRaises(self.launcher.LauncherRefusal):
-                self.launcher.validate_bootstrap_paths(launcher, hermes_home, outside)
-            home_link = root / "home-link"
-            home_link.symlink_to(hermes_home, target_is_directory=True)
-            with self.assertRaises(self.launcher.LauncherRefusal):
-                self.launcher.validate_bootstrap_paths(launcher, home_link, cwd)
-            hermes_home.chmod(0o755)
-            with self.assertRaises(self.launcher.LauncherRefusal):
-                self.launcher.validate_bootstrap_paths(launcher, hermes_home, cwd)
-
-    def test_infers_posix_and_windows_venv_site_packages_without_importing_site(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            posix_python = root / "posix" / "bin" / "python3"
-            posix_python.parent.mkdir(parents=True)
-            posix_python.write_bytes(b"")
-            posix_site = root / "posix" / "lib" / "python3.14" / "site-packages"
-            posix_site.mkdir(parents=True)
-            windows_python = root / "windows" / "Scripts" / "python.exe"
-            windows_python.parent.mkdir(parents=True)
-            windows_python.write_bytes(b"")
-            windows_site = root / "windows" / "Lib" / "site-packages"
-            windows_site.mkdir(parents=True)
-
-            self.assertEqual(
-                self.launcher.infer_site_packages(
-                    posix_python, (3, 14), platform="posix"
-                ),
-                posix_site,
-            )
-            self.assertEqual(
-                self.launcher.infer_site_packages(
-                    windows_python, (3, 14), platform="nt"
-                ),
-                windows_site,
-            )
-
-            marker = root / "pth-ran"
-            (posix_site / "attacker.pth").write_text(
-                f"import pathlib; pathlib.Path({str(marker)!r}).write_text('bad')\n",
-                encoding="utf-8",
-            )
-            sys_path = ["/trusted/stdlib", "/trusted/lib-dynload"]
-            self.launcher.activate_site_packages(posix_site, sys_path)
+            self.assertEqual(site_packages, root / "runtime/python/lib/python3.12/site-packages")
             self.assertEqual(
                 sys_path,
-                ["/trusted/stdlib", "/trusted/lib-dynload", str(posix_site)],
+                [str(launcher.parent), "/stdlib", "/attacker", str(site_packages)],
             )
-            self.assertFalse(marker.exists())
 
-    def test_rejects_site_packages_outside_the_interpreter_venv(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            python = root / "venv" / "python3"
-            python.parent.mkdir()
-            python.write_bytes(b"")
+    def test_rejects_symlink_or_group_writable_profile_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            _python, launcher, home, cwd = self.make_private_tree(root)
+            home_link = root / "profile-link"
+            home_link.symlink_to(home, target_is_directory=True)
             with self.assertRaises(self.launcher.LauncherRefusal):
-                self.launcher.infer_site_packages(python, (3, 14), platform="posix")
+                self.launcher.validate_bootstrap_paths(launcher, home_link, cwd)
+            home.chmod(0o770)
+            with self.assertRaises(self.launcher.LauncherRefusal):
+                self.launcher.validate_bootstrap_paths(launcher, home, cwd)
 
-    def test_site_packages_symlink_loops_are_generic_refusals(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            python = root / "venv" / "bin" / "python3"
+    def test_validates_only_the_pinned_private_read_only_bundled_skills_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            runtime_root = root / "runtimes" / "hermes" / "0.18.2"
+            python = runtime_root / "venv" / "bin" / "python3"
+            skills = runtime_root / "share" / "hermes" / "skills"
             python.parent.mkdir(parents=True)
-            python.write_bytes(b"")
-            site_packages = root / "venv" / "lib" / "python3.13" / "site-packages"
-            site_packages.parent.mkdir(parents=True)
-            site_packages.symlink_to(site_packages, target_is_directory=True)
+            python.write_bytes(b"python")
+            skills.mkdir(parents=True)
+            (runtime_root / "share").chmod(0o700)
+            (runtime_root / "share" / "hermes").chmod(0o700)
+            skills.chmod(0o500)
 
-            with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-                self.launcher.infer_site_packages(python, (3, 13), platform="posix")
+            self.assertEqual(
+                self.launcher.validate_bundled_skills_root(str(skills), python),
+                skills,
+            )
 
-            self.assertNotIn(CANARY, str(caught.exception))
-
-
-class InterpreterContractTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.launcher = load_launcher()
-
-    def test_accepts_only_python_versions_supported_by_pinned_hermes(self) -> None:
-        for major, minor in ((3, 11), (3, 12), (3, 13)):
-            with self.subTest(major=major, minor=minor):
-                self.assertTrue(
-                    self.launcher.is_supported_hermes_python_version(major, minor)
-                )
-
-        for major, minor in ((3, 10), (3, 14), (4, 0), (True, 11), (3, "13")):
-            with self.subTest(major=major, minor=minor):
-                self.assertFalse(
-                    self.launcher.is_supported_hermes_python_version(major, minor)
-                )
-
-    def test_current_unsupported_interpreter_is_rejected_before_bootstrap(self) -> None:
-        if self.launcher.is_supported_hermes_python_version(
-            sys.version_info.major,
-            sys.version_info.minor,
-        ):
-            self.skipTest("test host already uses a pinned-Hermes-compatible Python")
-
-        with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-            self.launcher.verify_interpreter_contract()
-
-        self.assertEqual(caught.exception.code, "interpreter_version")
-
-
-class AuditPolicyTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.launcher = load_launcher()
-
-    def make_policy(self, root: Path):
-        home = root / "hermes"
-        home.mkdir(mode=0o700)
-        cwd = home / "gateway-cwd"
-        cwd.mkdir(mode=0o700)
-        return self.launcher.AuditPolicy(home, cwd, broker_port=43117), home, cwd
-
-    def test_allows_only_the_exact_ipv4_loopback_broker_endpoint(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            policy, _, _ = self.make_policy(Path(raw_root).resolve())
-            policy("socket.__new__", (None, socket.AF_INET, socket.SOCK_STREAM, 0))
-            policy("socket.connect", (None, ("127.0.0.1", 43117)))
-            policy("socket.getaddrinfo", ("127.0.0.1", 43117, 0, 0, 0))
-            for address in (
-                ("localhost", 43117),
-                ("127.0.0.1", 43118),
-                ("::1", 43117),
-                ("8.8.8.8", 443),
-                "/tmp/broker.sock",
-            ):
-                with self.subTest(address=address):
-                    with self.assertRaises(self.launcher.LauncherRefusal):
-                        policy("socket.connect", (None, address))
-
-    def test_rejects_non_ipv4_stream_socket_creation(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            policy, _, _ = self.make_policy(Path(raw_root).resolve())
-            for family, kind, protocol in (
-                (socket.AF_INET6, socket.SOCK_STREAM, 0),
-                (socket.AF_UNIX, socket.SOCK_STREAM, 0),
-                (socket.AF_INET, socket.SOCK_DGRAM, 0),
-                (socket.AF_INET, socket.SOCK_RAW, 0),
-                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_UDP),
-            ):
-                with self.subTest(family=family, kind=kind, protocol=protocol):
-                    with self.assertRaises(self.launcher.LauncherRefusal):
-                        policy("socket.__new__", (None, family, kind, protocol))
-
-    def test_blocks_all_alternate_dns_resolution_events(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            policy, _, _ = self.make_policy(Path(raw_root).resolve())
-            for event, args in (
-                ("socket.gethostbyname", ("attacker.invalid",)),
-                ("socket.gethostbyaddr", ("8.8.8.8",)),
-                ("socket.getnameinfo", (("8.8.8.8", 53), 0)),
-                ("socket.gethostname", ()),
-                ("socket.getservbyname", ("domain", "udp")),
-                ("socket.sendmsg", (None, [b"payload"], [], 0, ("8.8.8.8", 53))),
-                ("socket.sethostname", ("attacker",)),
-            ):
-                with self.subTest(event=event):
-                    with self.assertRaises(self.launcher.LauncherRefusal):
-                        policy(event, args)
-
-    def test_blocks_process_creation_and_dynamic_library_loading(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            policy, _, _ = self.make_policy(Path(raw_root).resolve())
-            for event in (
-                "subprocess.Popen",
-                "os.system",
-                "os.posix_spawn",
-                "pty.spawn",
-                "ctypes.dlopen",
-            ):
-                with self.subTest(event=event):
-                    with self.assertRaises(self.launcher.LauncherRefusal):
-                        policy(event, (CANARY,))
-
-    def test_blocks_bind_listen_and_all_datagram_sends(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            policy, _, _ = self.make_policy(Path(raw_root).resolve())
-            for event, args in (
-                ("socket.bind", (None, ("127.0.0.1", 43117))),
-                ("socket.listen", (None,)),
-                ("socket.sendto", (None, ("127.0.0.1", 43117))),
-                ("socket.sendto", (None, b"payload", ("8.8.8.8", 53))),
-            ):
-                with self.subTest(event=event, args=args):
-                    with self.assertRaises(self.launcher.LauncherRefusal):
-                        policy(event, args)
-
-    def test_blocks_writes_outside_hermes_home_without_rendering_the_path(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            policy, home, _ = self.make_policy(root)
-            policy("open", (str(home / "state.db"), "w", 0))
-            policy("open", (str(root / "outside.txt"), "r", 0))
+            skills.chmod(0o700)
             with self.assertRaises(self.launcher.LauncherRefusal):
-                policy(
-                    "open",
-                    (str(root / "outside-os-open.txt"), None, os.O_CREAT | os.O_WRONLY),
+                self.launcher.validate_bundled_skills_root(str(skills), python)
+            skills.chmod(0o500)
+
+            linked = root / "skills-link"
+            linked.symlink_to(skills, target_is_directory=True)
+            with self.assertRaises(self.launcher.LauncherRefusal):
+                self.launcher.validate_bundled_skills_root(str(linked), python)
+
+    def test_disables_core_dumps(self) -> None:
+        with mock.patch.object(self.launcher.resource, "setrlimit") as setrlimit:
+            self.launcher.disable_core_dumps()
+        setrlimit.assert_called_once_with(self.launcher.resource.RLIMIT_CORE, (0, 0))
+
+    def test_anthropic_resolver_is_limited_to_the_profile_auth_mode(self) -> None:
+        def adapter(token: str) -> object:
+            return types.SimpleNamespace(
+                read_claude_code_credentials=lambda: {"accessToken": CANARY},
+                _read_claude_code_credentials_from_keychain=lambda: {"accessToken": CANARY},
+                _read_claude_code_credentials_from_file=lambda: {"accessToken": CANARY},
+                resolve_anthropic_token=lambda: token,
+                _is_oauth_token=lambda value: value.startswith("sk-ant-oat"),
+            )
+
+        api_adapter = adapter("sk-ant-oat01-stale-profile")
+        api_payload = self.launcher.parse_bootstrap_payload(
+            valid_payload(
+                providerSlug="anthropic",
+                authMode="api_key",
+                apiMode="chat_completions",
+            )
+        )
+        self.launcher.install_anthropic_auth_guard(api_adapter, api_payload)
+        self.assertEqual(api_adapter.resolve_anthropic_token(), CANARY)
+        self.assertIsNone(api_adapter.read_claude_code_credentials())
+
+        rejected_oauth_adapter = adapter("sk-ant-api03-stale-key")
+        oauth_payload = self.launcher.parse_bootstrap_payload(
+            valid_payload(
+                providerSlug="anthropic",
+                authMode="oauth",
+                apiMode="chat_completions",
+                apiKey=None,
+                baseUrl=None,
+            )
+        )
+        self.launcher.install_anthropic_auth_guard(rejected_oauth_adapter, oauth_payload)
+        self.assertIsNone(rejected_oauth_adapter.resolve_anthropic_token())
+
+        accepted_oauth_adapter = adapter("sk-ant-oat01-profile")
+        self.launcher.install_anthropic_auth_guard(accepted_oauth_adapter, oauth_payload)
+        self.assertEqual(
+            accepted_oauth_adapter.resolve_anthropic_token(), "sk-ant-oat01-profile"
+        )
+
+    def test_anthropic_runtime_pool_cannot_bypass_the_guarded_resolver(self) -> None:
+        calls: list[str] = []
+        api_entry = types.SimpleNamespace(auth_type="api_key")
+        oauth_entry = types.SimpleNamespace(auth_type="oauth", base_url="https://api.anthropic.com")
+        attacker_oauth_entry = types.SimpleNamespace(
+            auth_type="oauth", base_url="https://attacker.invalid/anthropic"
+        )
+        pool = types.SimpleNamespace(_entries=[api_entry, oauth_entry])
+        module = types.SimpleNamespace(load_pool=lambda provider: calls.append(provider) or pool)
+        api_payload = self.launcher.parse_bootstrap_payload(
+            valid_payload(
+                providerSlug="anthropic",
+                authMode="api_key",
+                apiMode="chat_completions",
+            )
+        )
+
+        self.launcher.install_provider_pool_guard(module, api_payload)
+
+        self.assertIsNone(module.load_pool("anthropic"))
+        self.assertIs(module.load_pool("deepseek"), pool)
+        self.assertEqual(pool._entries, [api_entry, oauth_entry])
+        self.assertEqual(calls, ["deepseek"])
+
+        oauth_pool = types.SimpleNamespace(
+            _entries=[api_entry, attacker_oauth_entry, oauth_entry]
+        )
+        oauth_module = types.SimpleNamespace(load_pool=lambda _provider: oauth_pool)
+        oauth_payload = self.launcher.parse_bootstrap_payload(
+            valid_payload(
+                providerSlug="anthropic",
+                authMode="oauth",
+                apiMode="chat_completions",
+                apiKey=None,
+                baseUrl=None,
+            )
+        )
+
+        self.launcher.install_provider_pool_guard(oauth_module, oauth_payload)
+
+        self.assertIs(oauth_module.load_pool("anthropic"), oauth_pool)
+        self.assertEqual(oauth_pool._entries, [oauth_entry])
+
+        copilot_calls: list[str] = []
+        copilot_module = types.SimpleNamespace(
+            load_pool=lambda provider: copilot_calls.append(provider) or pool
+        )
+        copilot_payload = self.launcher.parse_bootstrap_payload(
+            valid_payload(
+                providerSlug="copilot",
+                authMode="oauth",
+                apiMode="codex_responses",
+                apiKey=None,
+                baseUrl=None,
+            )
+        )
+        self.launcher.install_provider_pool_guard(copilot_module, copilot_payload)
+        self.assertIsNone(copilot_module.load_pool("copilot"))
+        self.assertEqual(copilot_calls, [])
+
+    def test_loads_exact_wheel_and_returns_upstream_main_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            site_packages = Path(raw).resolve()
+            called: list[str] = []
+
+            def version(name: str) -> str:
+                called.append(f"version:{name}")
+                return "0.18.2"
+
+            upstream_main = mock.Mock(name="upstream_main")
+            bundled_skills_root = Path(raw).resolve() / "bundled-skills"
+            bundled_skills_root.mkdir()
+            (Path(raw).resolve() / "gh-config").mkdir(mode=0o700)
+            (Path(raw).resolve() / "xdg-config").mkdir(mode=0o700)
+            (Path(raw).resolve() / "codex-home").mkdir(mode=0o700)
+
+            def sync_skills_impl(*, quiet: bool) -> dict[str, object]:
+                self.assertTrue(quiet)
+                self.assertEqual(
+                    os.environ.get("HERMES_BUNDLED_SKILLS"),
+                    str(bundled_skills_root),
                 )
-            with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-                policy("open", (str(root / CANARY), "w", 0))
-            self.assertNotIn(CANARY, str(caught.exception))
+                return valid_skills_sync_result()
 
-    def test_rejects_all_relative_writes_and_unverifiable_fd_writes(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            policy, _, _ = self.make_policy(root)
-            for event, args in (
-                ("open", ("relative-open", None, os.O_CREAT | os.O_WRONLY)),
-                ("os.rename", ("relative-source", "relative-destination", -1, -1)),
-                ("os.remove", ("relative-remove", -1)),
-                ("open", (9, "w", 0)),
-            ):
-                with self.subTest(event=event):
-                    with self.assertRaises(self.launcher.LauncherRefusal):
-                        policy(event, args)
-
-            policy("open", (9, "r", 0))
-
-    def test_symlink_loop_write_paths_are_generic_refusals(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            policy, _, _ = self.make_policy(root)
-            loop = root / f"audit-loop-{CANARY}"
-            loop.symlink_to(loop)
-
-            with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-                policy("open", (str(loop / "target"), "w", 0))
-
-            self.assertNotIn(CANARY, str(caught.exception))
-
-    def test_runtime_error_from_audit_path_resolution_is_generic(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            policy, home, _ = self.make_policy(root)
-            with mock.patch.object(Path, "resolve", side_effect=RuntimeError(CANARY)):
-                with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-                    policy("open", (str(home / "state.db"), "w", 0))
-
-            self.assertNotIn(CANARY, str(caught.exception))
-
-    def test_checks_common_path_mutations_and_blocks_fd_truncate(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            policy, home, _ = self.make_policy(root)
-            for event, args in (
-                ("os.truncate", (str(root / "outside"), 0)),
-                ("os.setxattr", (str(root / "outside"), "user.key", b"value", 0)),
-                ("os.removexattr", (str(root / "outside"), "user.key")),
-                ("os.mknod", (str(root / "outside"), 0o600, 0)),
-                ("os.mkfifo", (str(root / "outside"), 0o600)),
-                ("os.ftruncate", (9, 0)),
-            ):
-                with self.subTest(event=event):
-                    with self.assertRaises(self.launcher.LauncherRefusal):
-                        policy(event, args)
-
-            policy("os.truncate", (str(home / "state.db"), 0))
-            policy("os.setxattr", (str(home / "state.db"), "user.key", b"value", 0))
-
-    def test_rejects_permission_environment_process_signal_and_subinterpreter_controls(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            policy, home, _ = self.make_policy(root)
-            for event, args in (
-                ("os.chmod", (str(home), 0o777, -1)),
-                ("os.chown", (str(home), os.getuid(), os.getgid(), -1)),
-                ("os.fchmod", (9, 0o777)),
-                ("os.fchown", (9, os.getuid(), os.getgid())),
-                ("os.putenv", (b"HERMES_SAFE_MODE", b"0")),
-                ("os.unsetenv", (b"HERMES_IGNORE_RULES",)),
-                ("os.fork", ()),
-                ("os.forkpty", ()),
-                ("os.kill", (os.getpid(), 0)),
-                ("os.killpg", (os.getpgrp(), 0)),
-            ):
-                with self.subTest(event=event):
-                    with self.assertRaises(self.launcher.LauncherRefusal):
-                        policy(event, args)
-
-    def test_real_hook_preserves_permissions_and_python_and_c_environments(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            home = root / "hermes"
-            home.mkdir(mode=0o700)
-            cwd = home / "gateway-cwd"
-            cwd.mkdir(mode=0o700)
-            state = home / "state.db"
-            state.write_text("state", encoding="utf-8")
-            state.chmod(0o600)
-            code = f"""
-import ctypes, importlib.util, json, os, pathlib, stat, sys
-spec = importlib.util.spec_from_file_location('launcher_controls_child', {str(LAUNCHER)!r})
-module = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = module
-spec.loader.exec_module(module)
-home = pathlib.Path({str(home)!r})
-cwd = pathlib.Path({str(cwd)!r})
-state = pathlib.Path({str(state)!r})
-state_fd = os.open(state, os.O_RDWR)
-libc = ctypes.CDLL(None)
-c_getenv = libc.getenv
-c_getenv.argtypes = [ctypes.c_char_p]
-c_getenv.restype = ctypes.c_char_p
-os.environ['HERMES_SAFE_MODE'] = '1'
-os.environ['HERMES_IGNORE_USER_CONFIG'] = '1'
-os.environ['HERMES_IGNORE_RULES'] = '1'
-os.environ.pop('OPENAI_API_KEY', None)
-os.unsetenv('OPENAI_API_KEY')
-policy = module.AuditPolicy(home, cwd, broker_port=43117)
-sys.addaudithook(policy)
-outcomes = {{}}
-def attempt(name, operation):
-    try:
-        operation()
-    except module.LauncherRefusal as error:
-        outcomes[name] = str(error)
-    except BaseException as error:
-        outcomes[name] = type(error).__name__
-    else:
-        outcomes[name] = 'allowed'
-attempt('chmod', lambda: os.chmod(home, 0o777))
-attempt('chown', lambda: os.chown(state, os.getuid(), os.getgid()))
-attempt('fchmod', lambda: os.fchmod(state_fd, 0o666))
-attempt('fchown', lambda: os.fchown(state_fd, os.getuid(), os.getgid()))
-attempt('mapping_set', lambda: os.environ.__setitem__('HERMES_SAFE_MODE', '0'))
-attempt('putenv', lambda: os.putenv('OPENAI_API_KEY', {CANARY!r}))
-attempt('mapping_delete', lambda: os.environ.__delitem__('HERMES_IGNORE_RULES'))
-attempt('unsetenv', lambda: os.unsetenv('HERMES_IGNORE_USER_CONFIG'))
-def c_value(name):
-    value = c_getenv(name.encode('ascii'))
-    return None if value is None else value.decode('ascii')
-observed = {{
-    'outcomes': outcomes,
-    'homeMode': stat.S_IMODE(os.stat(home).st_mode),
-    'stateMode': stat.S_IMODE(os.stat(state).st_mode),
-    'mappingSafe': os.environ.get('HERMES_SAFE_MODE'),
-    'cSafe': c_value('HERMES_SAFE_MODE'),
-    'mappingIgnoreConfig': os.environ.get('HERMES_IGNORE_USER_CONFIG'),
-    'cIgnoreConfig': c_value('HERMES_IGNORE_USER_CONFIG'),
-    'mappingIgnoreRules': os.environ.get('HERMES_IGNORE_RULES'),
-    'cIgnoreRules': c_value('HERMES_IGNORE_RULES'),
-    'mappingApiAbsent': 'OPENAI_API_KEY' not in os.environ,
-    'cApiAbsent': c_value('OPENAI_API_KEY') is None,
-}}
-print(json.dumps(observed, sort_keys=True))
-os.close(state_fd)
-"""
-            result = subprocess.run(
-                [sys.executable, "-I", "-S", "-B", "-u", "-X", "utf8", "-c", code],
-                check=False,
-                capture_output=True,
-                text=True,
+            sync_skills = mock.Mock(side_effect=sync_skills_impl)
+            anthropic_adapter = types.SimpleNamespace(
+                __file__=str(site_packages / "agent/anthropic_adapter.py"),
+                read_claude_code_credentials=lambda: {"accessToken": CANARY},
+                _read_claude_code_credentials_from_keychain=lambda: {"accessToken": CANARY},
+                _read_claude_code_credentials_from_file=lambda: {"accessToken": CANARY},
             )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            observed = json.loads(result.stdout)
-            self.assertEqual(
-                set(observed["outcomes"].values()),
-                {"OpenTrad Hermes launcher refused startup"},
-            )
-            self.assertEqual(observed["homeMode"], 0o700)
-            self.assertEqual(observed["stateMode"], 0o600)
-            self.assertEqual(observed["mappingSafe"], "1")
-            self.assertEqual(observed["cSafe"], "1")
-            self.assertEqual(observed["mappingIgnoreConfig"], "1")
-            self.assertEqual(observed["cIgnoreConfig"], "1")
-            self.assertEqual(observed["mappingIgnoreRules"], "1")
-            self.assertEqual(observed["cIgnoreRules"], "1")
-            self.assertTrue(observed["mappingApiAbsent"])
-            self.assertTrue(observed["cApiAbsent"])
-            self.assertNotIn(CANARY, result.stdout)
-            self.assertNotIn(CANARY, result.stderr)
-
-    def test_real_hook_blocks_fork_side_effect_and_zero_signal_operations(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            home = root / "hermes"
-            home.mkdir(mode=0o700)
-            cwd = home / "gateway-cwd"
-            cwd.mkdir(mode=0o700)
-            marker = root / "fork-child-side-effect"
-            marker.write_bytes(b"")
-            code = f"""
-import importlib.util, json, os, pathlib, sys
-spec = importlib.util.spec_from_file_location('launcher_process_child', {str(LAUNCHER)!r})
-module = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = module
-spec.loader.exec_module(module)
-home = pathlib.Path({str(home)!r})
-cwd = pathlib.Path({str(cwd)!r})
-marker_fd = os.open({str(marker)!r}, os.O_WRONLY | os.O_TRUNC)
-policy = module.AuditPolicy(home, cwd, broker_port=43117)
-sys.addaudithook(policy)
-outcomes = {{}}
-try:
-    child_pid = os.fork()
-except module.LauncherRefusal as error:
-    outcomes['fork'] = str(error)
-else:
-    if child_pid == 0:
-        os.write(marker_fd, b'child-ran')
-        os._exit(0)
-    os.waitpid(child_pid, 0)
-    outcomes['fork'] = 'allowed'
-def attempt(name, operation):
-    try:
-        operation()
-    except module.LauncherRefusal as error:
-        outcomes[name] = str(error)
-    except BaseException as error:
-        outcomes[name] = type(error).__name__
-    else:
-        outcomes[name] = 'allowed'
-attempt('kill', lambda: os.kill(os.getpid(), 0))
-attempt('killpg', lambda: os.killpg(os.getpgrp(), 0))
-print(json.dumps(outcomes, sort_keys=True))
-os.close(marker_fd)
-"""
-            result = subprocess.run(
-                [sys.executable, "-I", "-S", "-B", "-u", "-X", "utf8", "-c", code],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            outcomes = json.loads(result.stdout)
-            self.assertEqual(
-                set(outcomes.values()),
-                {"OpenTrad Hermes launcher refused startup"},
-            )
-            self.assertEqual(marker.read_bytes(), b"")
-
-    def test_real_subinterpreter_creation_is_blocked_when_supported(self) -> None:
-        python = find_supported_test_python()
-        if python is None:
-            self.skipTest("no Python 3.11-3.13 interpreter available")
-        availability = subprocess.run(
-            [
-                python,
-                "-I",
-                "-S",
-                "-c",
-                "import importlib.util; raise SystemExit(0 if importlib.util.find_spec('_xxsubinterpreters') else 1)",
-            ],
-            check=False,
-        )
-        if availability.returncode != 0:
-            self.skipTest(
-                "_xxsubinterpreters is unavailable on the supported interpreter"
-            )
-
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            home = root / "hermes"
-            home.mkdir(mode=0o700)
-            cwd = home / "gateway-cwd"
-            cwd.mkdir(mode=0o700)
-            marker = root / "subinterpreter-side-effect"
-            code = f"""
-import _xxsubinterpreters as subinterpreters
-import importlib.util, json, pathlib, sys
-spec = importlib.util.spec_from_file_location('launcher_subinterpreter_child', {str(LAUNCHER)!r})
-module = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = module
-spec.loader.exec_module(module)
-home = pathlib.Path({str(home)!r})
-cwd = home / 'gateway-cwd'
-policy = module.AuditPolicy(home, cwd, broker_port=43117)
-sys.addaudithook(policy)
-try:
-    interpreter = subinterpreters.create()
-except module.LauncherRefusal as error:
-    outcome = str(error)
-else:
-    subinterpreters.run_string(interpreter, "import pathlib; pathlib.Path({str(marker)!r}).write_text('created', encoding='utf-8')")
-    subinterpreters.destroy(interpreter)
-    outcome = 'allowed'
-print(json.dumps({{'outcome': outcome}}))
-"""
-            result = subprocess.run(
-                [python, "-I", "-S", "-B", "-u", "-X", "utf8", "-c", code],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertEqual(result.returncode, 78, result.stderr)
-            self.assertEqual(result.stdout, "")
-            self.assertEqual(
-                result.stderr, "OpenTrad Hermes launcher refused startup\n"
-            )
-            self.assertFalse(marker.exists())
-
-    def test_real_audit_hook_blocks_openat_renameat_and_unlinkat_without_side_effects(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            home = root / "hermes"
-            home.mkdir(mode=0o700)
-            cwd = home / "gateway-cwd"
-            cwd.mkdir(mode=0o700)
-            outside = root / "outside"
-            outside.mkdir(mode=0o700)
-            rename_source = home / "rename-source"
-            rename_source.write_text("source", encoding="utf-8")
-            open_target = outside / "dirfd-open-canary"
-            rename_target = outside / "dirfd-rename-canary"
-            unlink_target = outside / "dirfd-unlink-canary"
-            unlink_target.write_text("keep", encoding="utf-8")
-            code = f"""
-import importlib.util, json, os, pathlib, sys
-spec = importlib.util.spec_from_file_location('launcher_audit_child', {str(LAUNCHER)!r})
-module = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = module
-spec.loader.exec_module(module)
-home = pathlib.Path({str(home)!r})
-cwd = pathlib.Path({str(cwd)!r})
-outside = pathlib.Path({str(outside)!r})
-home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY)
-outside_fd = os.open(outside, os.O_RDONLY | os.O_DIRECTORY)
-policy = module.AuditPolicy(home, cwd, broker_port=43117)
-sys.addaudithook(policy)
-outcomes = {{}}
-def attempt(name, operation):
-    try:
-        operation()
-    except module.LauncherRefusal as error:
-        outcomes[name] = str(error)
-    else:
-        outcomes[name] = 'allowed'
-attempt('openat', lambda: os.open('dirfd-open-canary', os.O_CREAT | os.O_WRONLY, 0o600, dir_fd=outside_fd))
-attempt('renameat', lambda: os.rename('rename-source', 'dirfd-rename-canary', src_dir_fd=home_fd, dst_dir_fd=outside_fd))
-attempt('unlinkat', lambda: os.unlink('dirfd-unlink-canary', dir_fd=outside_fd))
-print(json.dumps(outcomes, sort_keys=True))
-os.close(home_fd)
-os.close(outside_fd)
-"""
-
-            result = subprocess.run(
-                [sys.executable, "-I", "-S", "-B", "-u", "-X", "utf8", "-c", code],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            outcomes = json.loads(result.stdout)
-            self.assertEqual(
-                set(outcomes.values()),
-                {"OpenTrad Hermes launcher refused startup"},
-            )
-            self.assertNotIn("dirfd", result.stdout)
-            self.assertNotIn("dirfd", result.stderr)
-            self.assertFalse(open_target.exists())
-            self.assertFalse(rename_target.exists())
-            self.assertTrue(rename_source.exists())
-            self.assertEqual(unlink_target.read_text(encoding="utf-8"), "keep")
-
-
-class SafeJsonTransportTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.launcher = load_launcher()
-
-    def capability(self):
-        now = int(time.time())
-        return self.launcher.parse_capability(
-            valid_capability(expiresAt=now + 30),
-            now=now,
-        )
-
-    def test_compacts_redacts_and_canonicalizes_error_responses(self) -> None:
-        output = io.BytesIO()
-        capability = self.capability()
-        transport = self.launcher.SafeJsonTransport(output, capability)
-
-        written = transport.write_frame(
-            {
-                "jsonrpc": "2.0",
-                "id": f"prefix-{CANARY}-suffix",
-                "error": {
-                    "code": -32603,
-                    "message": f"server exploded with {CANARY}",
-                    "data": {"secret": CANARY},
-                },
-                "nested": [f"value-{CANARY}"],
+            modules = {
+                "hermes_cli": types.SimpleNamespace(
+                    __version__="0.18.2",
+                    __release_date__="2026.7.7.2",
+                    __file__=str(site_packages / "hermes_cli/__init__.py"),
+                ),
+                "hermes_cli.env_loader": types.SimpleNamespace(
+                    __file__=str(site_packages / "hermes_cli/env_loader.py"),
+                    load_hermes_dotenv=lambda **_kwargs: [],
+                ),
+                "hermes_cli.config": types.SimpleNamespace(
+                    __file__=str(site_packages / "hermes_cli/config.py"),
+                    apply_terminal_config_to_env=lambda **_kwargs: {},
+                ),
+                "hermes_cli.runtime_provider": types.SimpleNamespace(
+                    __file__=str(site_packages / "hermes_cli/runtime_provider.py"),
+                    load_pool=lambda provider: provider,
+                ),
+                "agent.credential_pool": types.SimpleNamespace(
+                    __file__=str(site_packages / "agent/credential_pool.py"),
+                    load_pool=lambda provider: provider,
+                ),
+                "agent.anthropic_adapter": anthropic_adapter,
+                "tools.skills_sync": types.SimpleNamespace(
+                    __file__=str(site_packages / "tools/skills_sync.py"),
+                    sync_skills=sync_skills,
+                ),
+                "tui_gateway.entry": types.SimpleNamespace(
+                    __file__=str(site_packages / "tui_gateway/entry.py"),
+                    main=upstream_main,
+                ),
             }
-        )
 
-        self.assertTrue(written)
-        wire = output.getvalue()
-        self.assertTrue(wire.endswith(b"\n"))
-        self.assertNotIn(CANARY.encode(), wire)
-        self.assertNotIn(b"server exploded", wire)
-        self.assertNotIn(b'": ', wire)
-        self.assertNotIn(b", ", wire)
-        decoded = json.loads(wire)
-        self.assertEqual(decoded["id"], "prefix-<redacted>-suffix")
-        self.assertEqual(
-            decoded["error"],
-            {"code": -32603, "message": "Internal error"},
-        )
-        self.assertEqual(decoded["nested"], ["value-<redacted>"])
-        self.assertNotIn(CANARY, repr(capability))
-        self.assertNotIn(CANARY, repr(transport))
+            def importer(name: str) -> object:
+                called.append(f"import:{name}")
+                return modules[name]
 
-    def test_preserves_safe_application_error_codes_with_fixed_messages(self) -> None:
-        output = io.BytesIO()
-        transport = self.launcher.SafeJsonTransport(output, self.capability())
-
-        self.assertTrue(
-            transport.write(
+            payload = self.launcher.parse_bootstrap_payload(valid_payload())
+            with mock.patch.dict(
+                os.environ,
                 {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "error": {"code": 5032, "message": f"private {CANARY}"},
-                }
-            )
-        )
-        self.assertTrue(
-            transport.write(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "error": {"code": -32602, "message": f"private {CANARY}"},
-                }
-            )
-        )
-        self.assertTrue(
-            transport.write(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "error": {
-                        "code": self.launcher.MAX_SAFE_JSON_INTEGER + 1,
-                        "message": f"private {CANARY}",
-                    },
-                }
-            )
-        )
-
-        frames = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual(frames[0]["error"], {"code": 5032, "message": "Server error"})
-        self.assertEqual(
-            frames[1]["error"],
-            {"code": -32602, "message": "Invalid params"},
-        )
-        self.assertEqual(
-            frames[2]["error"],
-            {"code": -32603, "message": "Internal error"},
-        )
-        self.assertNotIn(CANARY.encode(), output.getvalue())
-
-    def test_returns_false_for_oversize_unserializable_and_write_failures(self) -> None:
-        capability = self.capability()
-        oversized_output = io.BytesIO()
-        oversized = self.launcher.SafeJsonTransport(oversized_output, capability)
-        self.assertFalse(
-            oversized.write_frame(
-                {"payload": "x" * self.launcher.MAX_NDJSON_FRAME_BYTES}
-            )
-        )
-        self.assertEqual(oversized_output.getvalue(), b"")
-
-        cyclic: dict[str, object] = {}
-        cyclic["self"] = cyclic
-        self.assertFalse(oversized.write_frame(cyclic))
-        self.assertEqual(oversized_output.getvalue(), b"")
-
-        class FailingBinaryOutput:
-            def write(self, _data: bytes) -> int:
-                raise OSError(CANARY)
-
-            def flush(self) -> None:
-                raise AssertionError("flush must not follow a failed write")
-
-        failing = self.launcher.SafeJsonTransport(FailingBinaryOutput(), capability)
-        self.assertFalse(failing.write_frame({"ok": True}))
-
-    def test_concurrent_writers_never_interleave_frames(self) -> None:
-        class SlowPartialBinaryOutput:
-            def __init__(self) -> None:
-                self.data = bytearray()
-
-            def write(self, data: bytes) -> int:
-                chunk = bytes(data[:3])
-                time.sleep(0)
-                self.data.extend(chunk)
-                return len(chunk)
-
-            def flush(self) -> None:
-                time.sleep(0)
-
-        output = SlowPartialBinaryOutput()
-        transport = self.launcher.SafeJsonTransport(output, self.capability())
-        outcomes: list[bool] = []
-        outcomes_lock = threading.Lock()
-
-        def write(index: int) -> None:
-            result = transport.write_frame(
-                {"jsonrpc": "2.0", "id": index, "result": {"value": index}}
-            )
-            with outcomes_lock:
-                outcomes.append(result)
-
-        threads = [threading.Thread(target=write, args=(index,)) for index in range(24)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=2)
-
-        self.assertTrue(all(not thread.is_alive() for thread in threads))
-        self.assertEqual(outcomes, [True] * 24)
-        frames = bytes(output.data).splitlines()
-        self.assertEqual(len(frames), 24)
-        observed = {json.loads(frame)["id"] for frame in frames}
-        self.assertEqual(observed, set(range(24)))
-
-    def test_capture_stdout_uses_the_binary_buffer(self) -> None:
-        binary = io.BytesIO()
-
-        class TextStdout:
-            buffer = binary
-
-        with mock.patch.object(self.launcher.sys, "stdout", TextStdout()):
-            transport = self.launcher.SafeJsonTransport.capture_stdout(
-                self.capability()
-            )
-            self.assertTrue(transport.write_frame({"captured": True}))
-
-        self.assertEqual(json.loads(binary.getvalue()), {"captured": True})
-
-    def test_official_write_and_idempotent_logical_close_are_thread_safe(self) -> None:
-        output = io.BytesIO()
-        transport = self.launcher.SafeJsonTransport(output, self.capability())
-
-        self.assertTrue(transport.write({"before": True}))
-        before_close = output.getvalue()
-        transport.close()
-        transport.close()
-
-        self.assertFalse(transport.write({"after": True}))
-        self.assertFalse(transport.write_frame({"afterFrame": True}))
-        self.assertEqual(output.getvalue(), before_close)
-        self.assertFalse(output.closed)
-
-
-class RpcPolicyTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.launcher = load_launcher()
-
-    def policy_context(self):
-        return self.launcher.RpcPolicyContext(Path("/opentrad/gateway-cwd"))
-
-    def dispatch(self, method: str, params: dict[str, object]):
-        calls: list[dict[str, object]] = []
-
-        def dispatcher(request: dict[str, object]):
-            calls.append(request)
-            return {"jsonrpc": "2.0", "id": request["id"], "result": {}}
-
-        request = self.launcher.RpcRequest(
-            request_id=17,
-            method=method,
-            params=params,
-        )
-        response = self.launcher.dispatch_rpc_request(
-            request,
-            dispatcher,
-            self.policy_context(),
-        )
-        return response, calls
-
-    def assert_invalid_params(self, method: str, params: dict[str, object]) -> None:
-        response, calls = self.dispatch(method, params)
-
-        self.assertEqual(calls, [])
-        self.assertEqual(
-            response,
-            {
-                "jsonrpc": "2.0",
-                "id": 17,
-                "error": {"code": -32602, "message": "Invalid params"},
-            },
-        )
-        self.assertNotIn(CANARY, json.dumps(response))
-
-    def test_policy_context_is_frozen_and_requires_a_canonical_absolute_path(
-        self,
-    ) -> None:
-        context = self.policy_context()
-
-        self.assertEqual(context.cwd, Path("/opentrad/gateway-cwd"))
-        self.assertFalse(hasattr(context, "__dict__"))
-        with self.assertRaises((AttributeError, TypeError)):
-            context.cwd = Path("/attacker")
-
-        for invalid in (
-            Path("relative/gateway-cwd"),
-            Path("/opentrad/../attacker"),
-            "/opentrad/gateway-cwd",
-        ):
-            with self.subTest(
-                invalid_type=type(invalid).__name__, invalid=str(invalid)
-            ):
-                with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-                    self.launcher.RpcPolicyContext(invalid)
-                self.assertEqual(str(caught.exception), self.launcher.GENERIC_REFUSAL)
-                self.assertNotIn(str(invalid), repr(caught.exception))
-
-    def test_valid_requests_are_normalized_for_the_pinned_gateway_contract(
-        self,
-    ) -> None:
-        cases = [
-            (
-                "session.create",
-                {},
-                {
-                    "cwd": "/opentrad/gateway-cwd",
-                    "source": "opentrad",
-                    "close_on_disconnect": True,
+                    "DEEPSEEK_API_KEY": CANARY,
+                    "HERMES_HOME": str(Path(raw).resolve()),
                 },
-            ),
-            (
-                "session.resume",
-                {"session_id": STORED_SESSION_ID},
-                {"session_id": STORED_SESSION_ID},
-            ),
-            (
-                "session.status",
-                {"session_id": LIVE_SESSION_ID},
-                {"session_id": LIVE_SESSION_ID},
-            ),
-            (
-                "session.close",
-                {"session_id": LIVE_SESSION_ID},
-                {"session_id": LIVE_SESSION_ID},
-            ),
-            (
-                "session.interrupt",
-                {"session_id": LIVE_SESSION_ID},
-                {"session_id": LIVE_SESSION_ID},
-            ),
-            (
-                "prompt.submit",
-                {"session_id": LIVE_SESSION_ID, "text": "  continue\n"},
-                {"session_id": LIVE_SESSION_ID, "text": "  continue\n"},
-            ),
-            (
-                "approval.respond",
-                {"session_id": LIVE_SESSION_ID, "choice": "deny"},
-                {"session_id": LIVE_SESSION_ID, "choice": "deny", "all": False},
-            ),
-        ]
-
-        for method, supplied, normalized in cases:
-            with self.subTest(method=method):
-                response, calls = self.dispatch(method, supplied)
-                self.assertEqual(
-                    calls,
-                    [
-                        {
-                            "jsonrpc": "2.0",
-                            "id": 17,
-                            "method": method,
-                            "params": normalized,
-                        }
-                    ],
-                )
-                self.assertEqual(
-                    response,
-                    {"jsonrpc": "2.0", "id": 17, "result": {}},
-                )
-
-    def test_session_create_accepts_only_an_empty_external_object(self) -> None:
-        forbidden = (
-            "cwd",
-            "source",
-            "messages",
-            "title",
-            "parent",
-            "profile",
-            "model",
-            "provider",
-            "reasoning",
-            "fast",
-            "cols",
-            "close_on_disconnect",
-        )
-        for key in forbidden:
-            with self.subTest(key=key):
-                self.assert_invalid_params("session.create", {key: CANARY})
-
-    def test_session_resume_requires_the_exact_stored_session_id_schema(self) -> None:
-        invalid_ids: tuple[object, ...] = (
-            "",
-            "20260711_120000_ABCDEf",
-            "20260711-120000-abcdef",
-            "2026071_120000_abcdef",
-            "20260711_120000_abcde",
-            "20260711_120000_abcdef0",
-            "２０２６０７１１_１２００００_abcdef",
-            True,
-            20260711,
-            CANARY,
-        )
-        for session_id in invalid_ids:
-            with self.subTest(session_id_type=type(session_id).__name__):
-                self.assert_invalid_params(
-                    "session.resume",
-                    {"session_id": session_id},
-                )
-        for forbidden in ("title", "profile", "lazy", "eager", "model", "cols"):
-            with self.subTest(forbidden=forbidden):
-                self.assert_invalid_params(
-                    "session.resume",
-                    {"session_id": STORED_SESSION_ID, forbidden: True},
-                )
-
-    def test_live_session_methods_require_one_lowercase_hex_session_id(self) -> None:
-        methods = (
-            "session.status",
-            "session.close",
-            "session.interrupt",
-        )
-        invalid_ids: tuple[object, ...] = (
-            "",
-            "abcdefg0",
-            "ABCDEF12",
-            "abcdef1",
-            "abcdef123",
-            True,
-            12345678,
-            CANARY,
-        )
-        for method in methods:
-            for session_id in invalid_ids:
-                with self.subTest(
-                    method=method, session_id_type=type(session_id).__name__
-                ):
-                    self.assert_invalid_params(method, {"session_id": session_id})
-            self.assert_invalid_params(
-                method,
-                {"session_id": LIVE_SESSION_ID, "extra": CANARY},
-            )
-
-    def test_prompt_submit_validates_text_without_truncating_or_reflecting_it(
-        self,
-    ) -> None:
-        accepted = "\U0001f642" * 262_144
-        self.assertEqual(len(accepted), self.launcher.MAX_PROMPT_CHARACTERS)
-        self.assertEqual(
-            len(accepted.encode("utf-8")),
-            self.launcher.MAX_PROMPT_UTF8_BYTES,
-        )
-        response, calls = self.dispatch(
-            "prompt.submit",
-            {"session_id": LIVE_SESSION_ID, "text": accepted},
-        )
-        self.assertEqual(response["result"], {})
-        self.assertEqual(calls[0]["params"]["text"], accepted)
-
-        invalid_text: tuple[object, ...] = (
-            "",
-            " \t\n ",
-            "a" * 262_145,
-            "bad-surrogate-\ud800",
-            True,
-            123,
-            CANARY + "-" + "x" * 262_145,
-        )
-        for value in invalid_text:
-            with self.subTest(
-                value_type=type(value).__name__,
-                size=len(value) if isinstance(value, str) else 0,
+                clear=True,
             ):
-                self.assert_invalid_params(
-                    "prompt.submit",
-                    {"session_id": LIVE_SESSION_ID, "text": value},
+                loaded = self.launcher.load_upstream_gateway(
+                    site_packages,
+                    payload,
+                    Path(raw).resolve(),
+                    bundled_skills_root,
+                    version_getter=version,
+                    importer=importer,
                 )
-        self.assert_invalid_params(
-            "prompt.submit",
-            {"session_id": LIVE_SESSION_ID, "text": "continue", "truncate": True},
-        )
-        with mock.patch.object(self.launcher, "MAX_PROMPT_UTF8_BYTES", 3):
-            self.assert_invalid_params(
-                "prompt.submit",
-                {"session_id": LIVE_SESSION_ID, "text": "\U0001f642"},
+
+            self.assertIs(loaded, upstream_main)
+            self.assertEqual(
+                called,
+                [
+                    "version:hermes-agent",
+                    "import:hermes_cli",
+                    "import:agent.credential_pool",
+                    "import:agent.anthropic_adapter",
+                    "import:hermes_cli.runtime_provider",
+                    "import:hermes_cli.env_loader",
+                    "import:hermes_cli.config",
+                    "import:tools.skills_sync",
+                    "import:tui_gateway.entry",
+                ],
+            )
+            sync_skills.assert_called_once_with(quiet=True)
+            self.assertIsNone(anthropic_adapter.read_claude_code_credentials())
+            self.assertIsNone(anthropic_adapter._read_claude_code_credentials_from_keychain())
+            self.assertIsNone(anthropic_adapter._read_claude_code_credentials_from_file())
+            self.assertIs(
+                modules["hermes_cli.runtime_provider"].load_pool,
+                modules["agent.credential_pool"].load_pool,
             )
 
-    def test_approval_respond_accepts_only_once_or_deny_and_injects_all_false(
-        self,
-    ) -> None:
-        for choice in ("once", "deny"):
-            with self.subTest(choice=choice):
-                _, calls = self.dispatch(
-                    "approval.respond",
-                    {"session_id": LIVE_SESSION_ID, "choice": choice},
-                )
-                self.assertEqual(
-                    calls[0]["params"],
-                    {"session_id": LIVE_SESSION_ID, "choice": choice, "all": False},
-                )
+    def test_refuses_partial_or_out_of_origin_bundled_skills_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            site_packages = Path(raw).resolve() / "site-packages"
+            site_packages.mkdir()
+            profile_home = Path(raw).resolve() / "profile-home"
+            profile_home.mkdir(mode=0o700)
+            for child in ("gh-config", "xdg-config", "codex-home"):
+                (profile_home / child).mkdir(mode=0o700)
+            workspace = Path(raw).resolve() / "workspace"
+            workspace.mkdir()
+            bundled_skills = Path(raw).resolve() / "bundled-skills"
+            bundled_skills.mkdir()
+            payload = self.launcher.parse_bootstrap_payload(valid_payload())
 
-        for choice in ("always", "allow", "DENY", "", True, CANARY):
-            with self.subTest(choice_type=type(choice).__name__):
-                self.assert_invalid_params(
-                    "approval.respond",
-                    {"session_id": LIVE_SESSION_ID, "choice": choice},
-                )
-        self.assert_invalid_params(
-            "approval.respond",
-            {"session_id": LIVE_SESSION_ID, "choice": "once", "all": True},
-        )
+            def registry(
+                sync_file: Path, result: object
+            ) -> tuple[dict[str, object], list[bool]]:
+                sync_calls: list[bool] = []
 
-    def test_invalid_parameter_shape_never_reaches_or_leaks_through_dispatch(
-        self,
-    ) -> None:
-        class SecretString(str):
-            pass
+                def sync_skills(*, quiet: bool) -> object:
+                    sync_calls.append(quiet)
+                    return result
 
-        for method, params in (
-            ("session.create", {"secret": CANARY}),
-            ("session.resume", {}),
-            ("session.status", {"session_id": SecretString(LIVE_SESSION_ID)}),
-            ("prompt.submit", {"session_id": LIVE_SESSION_ID}),
-            ("approval.respond", {"session_id": LIVE_SESSION_ID}),
-        ):
-            with self.subTest(method=method):
-                self.assert_invalid_params(method, params)
+                modules = {
+                    "hermes_cli": types.SimpleNamespace(
+                        __version__="0.18.2",
+                        __release_date__="2026.7.7.2",
+                        __file__=str(site_packages / "hermes_cli/__init__.py"),
+                    ),
+                    "hermes_cli.env_loader": types.SimpleNamespace(
+                        __file__=str(site_packages / "hermes_cli/env_loader.py"),
+                        load_hermes_dotenv=lambda **_kwargs: [],
+                    ),
+                    "hermes_cli.config": types.SimpleNamespace(
+                        __file__=str(site_packages / "hermes_cli/config.py"),
+                        apply_terminal_config_to_env=lambda **_kwargs: {},
+                    ),
+                    "hermes_cli.runtime_provider": types.SimpleNamespace(
+                        __file__=str(site_packages / "hermes_cli/runtime_provider.py"),
+                        load_pool=lambda provider: provider,
+                    ),
+                    "agent.credential_pool": types.SimpleNamespace(
+                        __file__=str(site_packages / "agent/credential_pool.py"),
+                        load_pool=lambda provider: provider,
+                    ),
+                    "agent.anthropic_adapter": types.SimpleNamespace(
+                        __file__=str(site_packages / "agent/anthropic_adapter.py"),
+                        read_claude_code_credentials=lambda: None,
+                        _read_claude_code_credentials_from_keychain=lambda: None,
+                        _read_claude_code_credentials_from_file=lambda: None,
+                    ),
+                    "tools.skills_sync": types.SimpleNamespace(
+                        __file__=str(sync_file),
+                        sync_skills=sync_skills,
+                    ),
+                    "tui_gateway.entry": types.SimpleNamespace(
+                        __file__=str(site_packages / "tui_gateway/entry.py"),
+                        main=lambda: None,
+                    ),
+                }
+                return modules, sync_calls
 
-    def test_proxy_like_requests_and_params_fail_closed_without_running_getters(
-        self,
-    ) -> None:
-        touched: list[str] = []
+            cases = (
+                (
+                    site_packages / "tools/skills_sync.py",
+                    valid_skills_sync_result(copied=[f"skill-{index}" for index in range(71)]),
+                ),
+                (site_packages / "tools/skills_sync.py", valid_skills_sync_result(skipped=True)),
+                (Path(raw).resolve() / "shadow/skills_sync.py", valid_skills_sync_result()),
+            )
+            for index, (sync_file, result) in enumerate(cases):
+                modules, sync_calls = registry(sync_file, result)
+                with self.subTest(sync_file=sync_file, result=result):
+                    with mock.patch.dict(
+                        os.environ, {"HERMES_HOME": str(profile_home)}, clear=True
+                    ):
+                        with self.assertRaises(self.launcher.LauncherRefusal):
+                            self.launcher.load_upstream_gateway(
+                                site_packages,
+                                payload,
+                                workspace,
+                                bundled_skills,
+                                version_getter=lambda _name: "0.18.2",
+                                importer=lambda name, modules=modules: modules[name],
+                            )
+                    self.assertEqual(sync_calls, [True] if index < 2 else [])
 
-        class ExplodingRequest:
-            @property
-            def method(self):
-                touched.append("request.method")
-                raise AssertionError(CANARY)
+    def test_refuses_wrong_or_missing_wheel_and_non_callable_entrypoint(self) -> None:
+        for value in ("0.18.1", "0.18.2.dev1", "v2026.7.7.2"):
+            with self.subTest(value=value):
+                with self.assertRaises(self.launcher.LauncherRefusal):
+                    self.launcher.load_upstream_gateway(
+                        Path("/managed/site-packages"),
+                        self.launcher.parse_bootstrap_payload(valid_payload()),
+                        Path("/managed/workspace"),
+                        Path("/managed/bundled-skills"),
+                        version_getter=lambda _name, value=value: value,
+                        importer=lambda _name: types.SimpleNamespace(main=lambda: None),
+                    )
 
-        class ExplodingDict(dict):
-            def __iter__(self):
-                touched.append("params.iter")
-                raise AssertionError(CANARY)
+    def test_refuses_release_or_module_origin_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            site_packages = Path(raw).resolve()
+            profile_home = site_packages / "profile-home"
+            profile_home.mkdir(mode=0o700)
+            for child in ("gh-config", "xdg-config", "codex-home"):
+                (profile_home / child).mkdir(mode=0o700)
+            workspace = site_packages / "workspace"
+            workspace.mkdir()
+            bundled_skills = site_packages / "bundled-skills"
+            bundled_skills.mkdir()
+            payload = self.launcher.parse_bootstrap_payload(valid_payload())
 
-        calls: list[dict[str, object]] = []
-        response = self.launcher.dispatch_rpc_request(
-            ExplodingRequest(),
-            lambda request: calls.append(request),
-            self.policy_context(),
-        )
-        self.assertEqual(
-            response,
-            {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32600, "message": "Invalid Request"},
-            },
-        )
+            def modules(release: str, entry_file: Path) -> dict[str, object]:
+                return {
+                    "hermes_cli": types.SimpleNamespace(
+                        __version__="0.18.2",
+                        __release_date__=release,
+                        __file__=str(site_packages / "hermes_cli/__init__.py"),
+                    ),
+                    "hermes_cli.env_loader": types.SimpleNamespace(
+                        __file__=str(site_packages / "hermes_cli/env_loader.py"),
+                        load_hermes_dotenv=lambda **_kwargs: [],
+                    ),
+                    "hermes_cli.config": types.SimpleNamespace(
+                        __file__=str(site_packages / "hermes_cli/config.py"),
+                        apply_terminal_config_to_env=lambda **_kwargs: {},
+                    ),
+                    "hermes_cli.runtime_provider": types.SimpleNamespace(
+                        __file__=str(site_packages / "hermes_cli/runtime_provider.py"),
+                        load_pool=lambda provider: provider,
+                    ),
+                    "agent.credential_pool": types.SimpleNamespace(
+                        __file__=str(site_packages / "agent/credential_pool.py"),
+                        load_pool=lambda provider: provider,
+                    ),
+                    "agent.anthropic_adapter": types.SimpleNamespace(
+                        __file__=str(site_packages / "agent/anthropic_adapter.py"),
+                        read_claude_code_credentials=lambda: None,
+                        _read_claude_code_credentials_from_keychain=lambda: None,
+                        _read_claude_code_credentials_from_file=lambda: None,
+                    ),
+                    "tools.skills_sync": types.SimpleNamespace(
+                        __file__=str(site_packages / "tools/skills_sync.py"),
+                        sync_skills=lambda **_kwargs: valid_skills_sync_result(),
+                    ),
+                    "tui_gateway.entry": types.SimpleNamespace(
+                        __file__=str(entry_file),
+                        main=lambda: None,
+                    ),
+                }
 
-        request = self.launcher.RpcRequest(
-            request_id=19,
-            method="session.create",
-            params=ExplodingDict(),
-        )
-        response = self.launcher.dispatch_rpc_request(
-            request,
-            lambda dispatched: calls.append(dispatched),
-            self.policy_context(),
-        )
-        self.assertEqual(
-            response,
-            {
-                "jsonrpc": "2.0",
-                "id": 19,
-                "error": {"code": -32602, "message": "Invalid params"},
-            },
-        )
-        self.assertEqual(touched, [])
-        self.assertEqual(calls, [])
-        self.assertNotIn("data", response["error"])
-        self.assertNotIn(CANARY, json.dumps(response))
+            for release, entry_file in (
+                ("2026.7.7.1", site_packages / "tui_gateway/entry.py"),
+                ("2026.7.7.2", Path(raw).parent / "shadow/entry.py"),
+            ):
+                registry = modules(release, entry_file)
+                with self.subTest(release=release, entry_file=entry_file):
+                    with mock.patch.dict(
+                        os.environ, {"HERMES_HOME": str(profile_home)}, clear=True
+                    ):
+                        with self.assertRaises(self.launcher.LauncherRefusal):
+                            self.launcher.load_upstream_gateway(
+                                site_packages,
+                                payload,
+                                workspace,
+                                bundled_skills,
+                                version_getter=lambda _name: "0.18.2",
+                                importer=lambda name, registry=registry: registry[name],
+                            )
 
+    def test_native_gateway_call_is_not_wrapped_or_replaced(self) -> None:
+        upstream_main = mock.Mock(return_value=None)
+        result = self.launcher.run_upstream_gateway(upstream_main)
+        upstream_main.assert_called_once_with()
+        self.assertEqual(result, 0)
 
-class OwnedRuntimeLoaderTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.launcher = load_launcher()
+    def test_upstream_clean_system_exit_is_success_and_other_exit_is_refused(self) -> None:
+        def clean_exit() -> None:
+            raise SystemExit(0)
 
-    def tearDown(self) -> None:
-        module_name = getattr(
-            self.launcher,
-            "OWNED_RUNTIME_MODULE_NAME",
-            "_opentrad_owned_hermes_runtime_v1",
-        )
-        sys.modules.pop(module_name, None)
+        def failed_exit() -> None:
+            raise SystemExit(CANARY)
 
-    @staticmethod
-    def make_bundle(root: Path) -> tuple[Path, Path]:
-        launcher_path = root / "opentrad_hermes_launcher.py"
-        runtime_path = root / "opentrad_hermes_runtime.py"
-        shutil.copy2(LAUNCHER, launcher_path)
-        shutil.copy2(
-            LAUNCHER.with_name("opentrad_hermes_runtime.py"),
-            runtime_path,
-        )
-        launcher_path.chmod(0o644)
-        runtime_path.chmod(0o644)
-        return launcher_path, runtime_path
-
-    def assert_refused(self, launcher_path: Path) -> None:
+        self.assertEqual(self.launcher.run_upstream_gateway(clean_exit), 0)
         with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-            self.launcher._load_owned_runtime(launcher_path)
-        self.assertEqual(str(caught.exception), self.launcher.GENERIC_REFUSAL)
+            self.launcher.run_upstream_gateway(failed_exit)
         self.assertNotIn(CANARY, repr(caught.exception))
 
-    def test_loads_only_the_exact_owned_runtime_source_without_pyc_import(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            launcher_path, runtime_path = self.make_bundle(Path(raw_root).resolve())
 
-            module = self.launcher._load_owned_runtime(launcher_path)
-
-            self.assertEqual(
-                module.__name__,
-                self.launcher.OWNED_RUNTIME_MODULE_NAME,
-            )
-            self.assertEqual(module.__file__, str(runtime_path))
-            self.assertIs(sys.modules[module.__name__], module)
-            self.assertEqual(
-                module.PINNED_HERMES_VERSION,
-                "0.18.2",
-            )
-            self.assertFalse((runtime_path.parent / "__pycache__").exists())
-
-    def test_rejects_tampering_before_executing_any_runtime_source(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-            launcher_path, runtime_path = self.make_bundle(root)
-            marker = root / "runtime-source-executed"
-            runtime_path.write_bytes(
-                runtime_path.read_bytes()
-                + f"\nPath({str(marker)!r}).write_text({CANARY!r})\n".encode()
-            )
-
-            self.assert_refused(launcher_path)
-
-            self.assertFalse(marker.exists())
-            self.assertNotIn(
-                self.launcher.OWNED_RUNTIME_MODULE_NAME,
-                sys.modules,
-            )
-
-    def test_rejects_symlink_writable_oversize_and_module_collision(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root).resolve()
-
-            with self.subTest(case="symlink"):
-                case_root = root / "symlink"
-                case_root.mkdir()
-                launcher_path, runtime_path = self.make_bundle(case_root)
-                runtime_path.unlink()
-                runtime_path.symlink_to(
-                    LAUNCHER.with_name("opentrad_hermes_runtime.py")
-                )
-                self.assert_refused(launcher_path)
-
-            with self.subTest(case="writable"):
-                case_root = root / "writable"
-                case_root.mkdir()
-                launcher_path, runtime_path = self.make_bundle(case_root)
-                runtime_path.chmod(0o666)
-                self.assert_refused(launcher_path)
-
-            with self.subTest(case="oversize"):
-                case_root = root / "oversize"
-                case_root.mkdir()
-                launcher_path, runtime_path = self.make_bundle(case_root)
-                runtime_path.write_bytes(
-                    b"x" * (self.launcher.OWNED_RUNTIME_MAX_BYTES + 1)
-                )
-                runtime_path.chmod(0o644)
-                self.assert_refused(launcher_path)
-
-            with self.subTest(case="module-collision"):
-                case_root = root / "collision"
-                case_root.mkdir()
-                launcher_path, _runtime_path = self.make_bundle(case_root)
-                sentinel = object()
-                sys.modules[self.launcher.OWNED_RUNTIME_MODULE_NAME] = sentinel
-                self.assert_refused(launcher_path)
-                self.assertIs(
-                    sys.modules[self.launcher.OWNED_RUNTIME_MODULE_NAME],
-                    sentinel,
-                )
-
-
-class LauncherMainTests(unittest.TestCase):
+class MainContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.launcher = load_launcher()
 
-    @staticmethod
-    def state() -> types.SimpleNamespace:
-        return types.SimpleNamespace(
-            capability=object(),
+    def test_main_orders_trusted_bootstrap_before_third_party_import(self) -> None:
+        payload = self.launcher.parse_bootstrap_payload(valid_payload())
+        state = types.SimpleNamespace(
+            payload=payload,
             site_packages=Path("/managed/site-packages"),
-            paths=types.SimpleNamespace(
-                launcher=LAUNCHER,
-                cwd=Path("/private/gateway-cwd"),
-            ),
+            workspace_root=Path("/managed/workspace"),
+            bundled_skills_root=Path("/managed/bundled-skills"),
         )
-
-    def test_binary_stdin_capture_is_mandatory_and_non_reflective(self) -> None:
-        class TextOnlyInput:
-            def __repr__(self) -> str:
-                return CANARY
-
-        with mock.patch.object(self.launcher.sys, "stdin", TextOnlyInput()):
-            with self.assertRaises(self.launcher.LauncherRefusal) as caught:
-                self.launcher._capture_binary_stdin()
-
-        self.assertEqual(str(caught.exception), self.launcher.GENERIC_REFUSAL)
-        self.assertNotIn(CANARY, repr(caught.exception))
-
-    def test_main_wires_bootstrap_owned_runtime_and_loop_in_exact_order(self) -> None:
-        events: list[str] = []
-        state = self.state()
-        input_stream = io.BytesIO(b"")
-
-        class TrackingTransport:
-            def close(self) -> None:
-                events.append("close")
-
-        transport = TrackingTransport()
-
-        class GuardedRuntime:
-            def dispatch(self, _request: dict[str, object]):
-                return None
-
-            def shutdown(self) -> None:
-                events.append("shutdown")
-
-        guarded = GuardedRuntime()
-        runtime_module = object()
-
-        def instantiate_runtime(
-            supplied_module: object,
-            site_packages: Path,
-            supplied_transport: object,
-        ):
-            events.append("instantiate")
-            self.assertIs(supplied_module, runtime_module)
-            self.assertEqual(site_packages, state.site_packages)
-            self.assertIs(supplied_transport, transport)
-            return guarded
-
-        def run_loop(
-            supplied_input: object,
-            supplied_transport: object,
-            dispatcher: object,
-            shutdown: object,
-            policy_context: object,
-        ) -> bool:
-            events.append("loop")
-            self.assertIs(supplied_input, input_stream)
-            self.assertIs(supplied_transport, transport)
-            self.assertEqual(dispatcher, guarded.dispatch)
-            self.assertEqual(shutdown, guarded.shutdown)
-            self.assertEqual(policy_context.cwd, state.paths.cwd)
-            shutdown()
-            supplied_transport.close()
-            return True
+        calls: list[str] = []
 
         with (
             mock.patch.object(
                 self.launcher,
                 "bootstrap_pre_import",
-                side_effect=lambda: (events.append("bootstrap"), state)[1],
+                side_effect=lambda: calls.append("bootstrap") or state,
             ),
             mock.patch.object(
                 self.launcher,
-                "_capture_binary_stdin",
-                side_effect=lambda: (events.append("stdin"), input_stream)[1],
+                "load_upstream_gateway",
+                side_effect=lambda site, loaded_payload, workspace_root, bundled_skills_root: (
+                    calls.append("import")
+                    or self.assertEqual(site, state.site_packages)
+                    or self.assertIs(loaded_payload, payload)
+                    or self.assertEqual(workspace_root, state.workspace_root)
+                    or self.assertEqual(
+                        bundled_skills_root,
+                        state.bundled_skills_root,
+                    )
+                    or (lambda: calls.append("gateway"))
+                ),
             ),
-            mock.patch.object(
-                self.launcher.SafeJsonTransport,
-                "capture_stdout",
-                side_effect=lambda _capability: (
-                    events.append("stdout"),
-                    transport,
-                )[1],
-            ),
-            mock.patch.object(
-                self.launcher,
-                "_load_owned_runtime",
-                side_effect=lambda launcher_path: (
-                    self.assertEqual(launcher_path, state.paths.launcher),
-                    events.append("load"),
-                    runtime_module,
-                )[2],
-            ),
-            mock.patch.object(
-                self.launcher,
-                "_instantiate_owned_runtime",
-                side_effect=instantiate_runtime,
-            ),
-            mock.patch.object(self.launcher, "run_ndjson_loop", side_effect=run_loop),
-            mock.patch.object(self.launcher, "_write_generic_refusal") as refusal,
         ):
             result = self.launcher.main()
 
         self.assertEqual(result, 0)
-        self.assertEqual(
-            events,
-            [
-                "bootstrap",
-                "stdin",
-                "stdout",
-                "load",
-                "instantiate",
-                "loop",
-                "shutdown",
-                "close",
-            ],
-        )
-        refusal.assert_not_called()
-
-    def test_main_fails_closed_without_double_cleanup_or_exception_reflection(
-        self,
-    ) -> None:
-        for failure in ("load", "instantiate", "loop"):
-            with self.subTest(failure=failure):
-                close_calls: list[str] = []
-                shutdown_calls: list[str] = []
-                state = self.state()
-
-                class TrackingTransport:
-                    def close(self) -> None:
-                        close_calls.append("close")
-
-                transport = TrackingTransport()
-
-                class GuardedRuntime:
-                    def dispatch(self, _request: dict[str, object]):
-                        return None
-
-                    def shutdown(self) -> None:
-                        shutdown_calls.append("shutdown")
-
-                guarded = GuardedRuntime()
-
-                def instantiate_runtime(
-                    _module: object,
-                    _site: Path,
-                    _transport: object,
-                ):
-                    if failure == "instantiate":
-                        raise RuntimeError(CANARY)
-                    return guarded
-
-                runtime_module = object()
-
-                def load_owned(_launcher_path: Path):
-                    if failure == "load":
-                        raise RuntimeError(CANARY)
-                    return runtime_module
-
-                def run_loop(*_args: object) -> bool:
-                    guarded.shutdown()
-                    transport.close()
-                    if failure == "loop":
-                        return False
-                    return True
-
-                with (
-                    mock.patch.object(
-                        self.launcher,
-                        "bootstrap_pre_import",
-                        return_value=state,
-                    ),
-                    mock.patch.object(
-                        self.launcher,
-                        "_capture_binary_stdin",
-                        return_value=io.BytesIO(),
-                    ),
-                    mock.patch.object(
-                        self.launcher.SafeJsonTransport,
-                        "capture_stdout",
-                        return_value=transport,
-                    ),
-                    mock.patch.object(
-                        self.launcher,
-                        "_load_owned_runtime",
-                        side_effect=load_owned,
-                    ),
-                    mock.patch.object(
-                        self.launcher,
-                        "_instantiate_owned_runtime",
-                        side_effect=instantiate_runtime,
-                    ),
-                    mock.patch.object(
-                        self.launcher,
-                        "run_ndjson_loop",
-                        side_effect=run_loop,
-                    ),
-                    mock.patch.object(
-                        self.launcher,
-                        "_write_generic_refusal",
-                    ) as refusal,
-                ):
-                    result = self.launcher.main()
-
-                self.assertEqual(result, self.launcher.EX_CONFIG)
-                refusal.assert_called_once_with()
-                self.assertLessEqual(len(close_calls), 1)
-                self.assertLessEqual(len(shutdown_calls), 1)
-                if failure == "load":
-                    self.assertEqual(close_calls, ["close"])
-                    self.assertEqual(shutdown_calls, [])
-                elif failure == "instantiate":
-                    self.assertEqual(close_calls, ["close"])
-                    self.assertEqual(shutdown_calls, [])
-                else:
-                    self.assertEqual(close_calls, ["close"])
-                    self.assertEqual(shutdown_calls, ["shutdown"])
-
-    @unittest.skipUnless(
-        os.name == "posix" and REAL_SMOKE_PYTHON,
-        "set OPENTRAD_TEST_HERMES_PYTHON on the macOS Hermes runtime",
-    )
-    def test_real_pinned_wheel_process_emits_ready_and_quarantined_create(
-        self,
-    ) -> None:
-        python = Path(str(REAL_SMOKE_PYTHON))
-        self.assertTrue(python.is_absolute())
-        token = "launcher-real-smoke-token-0123456789abcdef"
-
-        with tempfile.TemporaryDirectory(prefix="opentrad-launcher-smoke-") as raw:
-            home = Path(raw).resolve()
-            home.chmod(0o700)
-            cwd = home / "gateway-cwd"
-            cwd.mkdir(mode=0o700)
-            read_fd, write_fd = os.pipe()
-
-            def prepare_child_fd() -> None:
-                if read_fd != self.launcher.CAPABILITY_FD:
-                    os.dup2(read_fd, self.launcher.CAPABILITY_FD)
-
-            process = subprocess.Popen(
-                [
-                    str(python),
-                    "-I",
-                    "-S",
-                    "-B",
-                    "-u",
-                    "-X",
-                    "utf8",
-                    str(LAUNCHER),
-                ],
-                cwd=cwd,
-                env={"HERMES_HOME": str(home), "LANG": "C.UTF-8"},
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                pass_fds=(read_fd,),
-                preexec_fn=prepare_child_fd,
-            )
-            os.close(read_fd)
-            try:
-                os.write(
-                    write_fd,
-                    valid_capability(
-                        expiresAt=int(time.time()) + 60,
-                        token=token,
-                    ),
-                )
-            finally:
-                os.close(write_fd)
-
-            stdout, stderr = process.communicate(
-                input=rpc_line("session.create", request_id=23, params={}),
-                timeout=20,
-            )
-
-        self.assertEqual(process.returncode, 0, stdout + stderr)
-        self.assertEqual(stderr, b"")
-        self.assertNotIn(token.encode(), stdout + stderr)
-        frames = [json.loads(line) for line in stdout.splitlines()]
-        self.assertEqual(frames[0], self.launcher.READY_ENVELOPE)
-        self.assertEqual(frames[1]["jsonrpc"], "2.0")
-        self.assertEqual(frames[1]["id"], 23)
-        result = frames[1]["result"]
-        self.assertEqual(result["info"]["runtime"], "hermes-quarantined")
-        self.assertEqual(result["info"]["state"], "quarantined")
-        self.assertFalse(result["persisted"])
-        self.assertFalse(result["resumable"])
-        self.assertIsNotNone(
-            self.launcher.LIVE_SESSION_ID_PATTERN.fullmatch(result["session_id"])
-        )
-        self.assertIsNotNone(
-            self.launcher.STORED_SESSION_ID_PATTERN.fullmatch(
-                result["stored_session_id"]
-            )
-        )
-
-
-class NdjsonLoopTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.launcher = load_launcher()
-
-    def capability(self):
-        now = int(time.time())
-        return self.launcher.parse_capability(
-            valid_capability(expiresAt=now + 30),
-            now=now,
-        )
-
-    def policy_context(self):
-        return self.launcher.RpcPolicyContext(Path("/opentrad/gateway-cwd"))
-
-    def run_loop(
-        self,
-        input_bytes: bytes,
-        dispatcher,
-        *,
-        output=None,
-        shutdown=None,
-    ):
-        binary_output = io.BytesIO() if output is None else output
-        transport = self.launcher.SafeJsonTransport(binary_output, self.capability())
-        shutdown_calls: list[str] = []
-
-        def default_shutdown() -> None:
-            shutdown_calls.append("shutdown")
-
-        result = self.launcher.run_ndjson_loop(
-            io.BytesIO(input_bytes),
-            transport,
-            dispatcher,
-            default_shutdown if shutdown is None else shutdown,
-            self.policy_context(),
-        )
-        frames = [json.loads(line) for line in binary_output.getvalue().splitlines()]
-        return result, frames, shutdown_calls
-
-    def test_uses_bounded_binary_readline_skips_blanks_and_shuts_down_once_at_eof(
-        self,
-    ) -> None:
-        class RecordingInput(io.BytesIO):
-            def __init__(self, initial: bytes) -> None:
-                super().__init__(initial)
-                self.sizes: list[int] = []
-
-            def readline(self, size: int = -1) -> bytes:
-                self.sizes.append(size)
-                return super().readline(size)
-
-        input_stream = RecordingInput(
-            b"\n  \r\n" + rpc_line("session.create", request_id=7, params={})
-        )
-        output = io.BytesIO()
-        transport = self.launcher.SafeJsonTransport(output, self.capability())
-        calls: list[dict[str, object]] = []
-        shutdown_calls: list[str] = []
-
-        def dispatcher(request: dict[str, object]):
-            calls.append(request)
-            return {
-                "jsonrpc": "2.0",
-                "id": request["id"],
-                "result": {"created": True},
-            }
-
-        result = self.launcher.run_ndjson_loop(
-            input_stream,
-            transport,
-            dispatcher,
-            lambda: shutdown_calls.append("shutdown"),
-            self.policy_context(),
-        )
-
-        self.assertTrue(result)
-        self.assertEqual(
-            input_stream.sizes,
-            [self.launcher.MAX_NDJSON_FRAME_BYTES + 1] * 4,
-        )
-        self.assertEqual(
-            calls,
-            [
-                {
-                    "jsonrpc": "2.0",
-                    "id": 7,
-                    "method": "session.create",
-                    "params": {
-                        "cwd": "/opentrad/gateway-cwd",
-                        "source": "opentrad",
-                        "close_on_disconnect": True,
-                    },
-                }
-            ],
-        )
-        self.assertEqual(shutdown_calls, ["shutdown"])
-        frames = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual(
-            frames[0],
-            {
-                "jsonrpc": "2.0",
-                "method": "event",
-                "params": {"type": "gateway.ready", "payload": {"skin": {}}},
-            },
-        )
-        self.assertEqual(
-            frames[1],
-            {"jsonrpc": "2.0", "id": 7, "result": {"created": True}},
-        )
-
-    def test_whitelist_is_exact_and_unknown_methods_never_reach_dispatcher(
-        self,
-    ) -> None:
-        expected = {
-            "session.create",
-            "session.resume",
-            "session.status",
-            "session.close",
-            "session.interrupt",
-            "prompt.submit",
-            "approval.respond",
-        }
-        self.assertEqual(set(self.launcher.ALLOWED_RPC_METHODS), expected)
-        calls: list[dict[str, object]] = []
-
-        def dispatcher(request: dict[str, object]):
-            calls.append(request)
-            return {"jsonrpc": "2.0", "id": request["id"], "result": None}
-
-        result, frames, shutdown_calls = self.run_loop(
-            rpc_line("terminal.execute", request_id="unknown")
-            + rpc_line("session.status", request_id="known"),
-            dispatcher,
-        )
-
-        self.assertTrue(result)
-        self.assertEqual(
-            calls,
-            [
-                {
-                    "jsonrpc": "2.0",
-                    "id": "known",
-                    "method": "session.status",
-                    "params": {"session_id": LIVE_SESSION_ID},
-                }
-            ],
-        )
-        self.assertEqual(shutdown_calls, ["shutdown"])
-        self.assertEqual(frames[1]["id"], "unknown")
-        self.assertEqual(
-            frames[1]["error"],
-            {"code": -32601, "message": "Method not found"},
-        )
-        self.assertEqual(frames[2], {"jsonrpc": "2.0", "id": "known", "result": None})
-
-        crafted = self.launcher.RpcRequest(
-            request_id=9,
-            method="terminal.execute",
-            params={},
-        )
-        direct = self.launcher.dispatch_rpc_request(
-            crafted,
-            dispatcher,
-            self.policy_context(),
-        )
-        self.assertEqual(
-            direct["error"],
-            {"code": -32601, "message": "Method not found"},
-        )
-        self.assertEqual(len(calls), 1)
-
-        original = self.launcher.RpcRequest(
-            request_id=10,
-            method="prompt.submit",
-            params={"session_id": LIVE_SESSION_ID, "text": "original"},
-        )
-
-        def mutating_dispatcher(request: dict[str, object]):
-            request["method"] = "terminal.execute"
-            request_params = request["params"]
-            assert isinstance(request_params, dict)
-            request_params["text"] = "mutated"
-            return {"jsonrpc": "2.0", "id": request["id"], "result": {}}
-
-        self.launcher.dispatch_rpc_request(
-            original,
-            mutating_dispatcher,
-            self.policy_context(),
-        )
-        self.assertEqual(original.method, "prompt.submit")
-        self.assertEqual(
-            original.params,
-            {"session_id": LIVE_SESSION_ID, "text": "original"},
-        )
-
-    def test_parse_duplicate_and_invalid_requests_use_fixed_errors(self) -> None:
-        duplicate = (
-            b'{"jsonrpc":"2.0","id":1,"id":2,"method":"session.status","params":{}}\n'
-        )
-        invalid_requests = [
-            b"[]\n",
-            b'{"jsonrpc":"1.0","id":1,"method":"session.status","params":{}}\n',
-            rpc_line("session.status", request_id=True),
-            rpc_line("session.status", request_id=9_007_199_254_740_992),
-            rpc_line("session.status", request_id="x" * 129),
-            b'{"jsonrpc":"2.0","id":1,"method":"","params":{}}\n',
-        ]
-        calls: list[str] = []
-        result, frames, _ = self.run_loop(
-            b"\xff\n" + b"{not-json}\n" + duplicate + b"".join(invalid_requests),
-            lambda request: calls.append(str(request["method"])),
-        )
-
-        self.assertTrue(result)
-        self.assertEqual(calls, [])
-        errors = [frame["error"] for frame in frames[1:]]
-        self.assertEqual(
-            errors[:3],
-            [{"code": -32700, "message": "Parse error"}] * 3,
-        )
-        self.assertEqual(
-            errors[3:],
-            [{"code": -32600, "message": "Invalid Request"}] * len(invalid_requests),
-        )
-        self.assertTrue(all(frame["id"] is None for frame in frames[1:]))
-
-    def test_non_object_method_params_use_fixed_invalid_params_without_dispatch(
-        self,
-    ) -> None:
-        requests = b"".join(
-            (
-                b'{"jsonrpc":"2.0","id":11,"method":"session.create","params":[]}\n',
-                b'{"jsonrpc":"2.0","id":12,"method":"session.status","params":null}\n',
-                b'{"jsonrpc":"2.0","id":13,"method":"prompt.submit","params":"'
-                + CANARY.encode("ascii")
-                + b'"}\n',
-            )
-        )
-        calls: list[dict[str, object]] = []
-
-        result, frames, shutdown_calls = self.run_loop(
-            requests,
-            lambda request: calls.append(request),
-        )
-
-        self.assertTrue(result)
-        self.assertEqual(calls, [])
-        self.assertEqual(shutdown_calls, ["shutdown"])
-        self.assertEqual([frame["id"] for frame in frames[1:]], [11, 12, 13])
-        self.assertEqual(
-            [frame["error"] for frame in frames[1:]],
-            [{"code": -32602, "message": "Invalid params"}] * 3,
-        )
-        self.assertNotIn(CANARY, json.dumps(frames))
-
-    def test_rejects_unsafe_and_nonfinite_json_numbers_without_crashing(self) -> None:
-        huge_integer = b"9" * 5_000
-        requests = (
-            b'{"jsonrpc":"2.0","id":1,"method":"session.status","params":{"n":'
-            + huge_integer
-            + b"}}\n"
-            + b'{"jsonrpc":"2.0","id":2,"method":"session.status","params":{"n":9007199254740992}}\n'
-            + b'{"jsonrpc":"2.0","id":3,"method":"session.status","params":{"n":1e309}}\n'
-            + b'{"jsonrpc":"2.0","id":4,"method":"session.status","params":{"n":9007199254740992.0}}\n'
-            + b'{"jsonrpc":"2.0","id":5,"method":"session.status","params":{"n":1.25}}\n'
-        )
-        calls: list[dict[str, object]] = []
-
-        def dispatcher(request: dict[str, object]):
-            calls.append(request)
-            return {"jsonrpc": "2.0", "id": request["id"], "result": {}}
-
-        result, frames, shutdown_calls = self.run_loop(requests, dispatcher)
-
-        self.assertTrue(result)
-        self.assertEqual(shutdown_calls, ["shutdown"])
-        self.assertEqual(
-            [frame["error"] for frame in frames[1:5]],
-            [{"code": -32700, "message": "Parse error"}] * 4,
-        )
-        self.assertEqual(calls, [])
-        self.assertEqual(
-            frames[5],
-            {
-                "jsonrpc": "2.0",
-                "id": 5,
-                "error": {"code": -32602, "message": "Invalid params"},
-            },
-        )
-
-    def test_rejects_lone_surrogates_in_nested_keys_and_values(self) -> None:
-        requests = (
-            b'{"jsonrpc":"2.0","id":1,"method":"session.status","params":{"value":"\\ud800"}}\n'
-            b'{"jsonrpc":"2.0","id":2,"method":"session.status","params":{"\\udfff":true}}\n'
-            + rpc_line(
-                "prompt.submit",
-                request_id=3,
-                params={"session_id": LIVE_SESSION_ID, "text": "正常"},
-            )
-            + b'{"jsonrpc":"2.0","id":4,"method":"prompt.submit",'
-            b'"params":{"session_id":"deadbeef","text":"\\ud800"}}\n'
-        )
-        calls: list[dict[str, object]] = []
-
-        def dispatcher(request: dict[str, object]):
-            calls.append(request)
-            return {"jsonrpc": "2.0", "id": request["id"], "result": {}}
-
-        result, frames, shutdown_calls = self.run_loop(requests, dispatcher)
-
-        self.assertTrue(result)
-        self.assertEqual(shutdown_calls, ["shutdown"])
-        self.assertEqual(
-            [frame["error"] for frame in frames[1:3]],
-            [{"code": -32602, "message": "Invalid params"}] * 2,
-        )
-        self.assertEqual(
-            calls,
-            [
-                {
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "prompt.submit",
-                    "params": {"session_id": LIVE_SESSION_ID, "text": "正常"},
-                }
-            ],
-        )
-        self.assertEqual(
-            frames[4],
-            {
-                "jsonrpc": "2.0",
-                "id": 4,
-                "error": {"code": -32602, "message": "Invalid params"},
-            },
-        )
-
-    def test_enforces_exact_nesting_limit_and_handles_parser_recursion(self) -> None:
-        def deep_request(request_id: int, depth: int) -> bytes:
-            nested = b"[" * depth + b"0" + b"]" * depth
-            return (
-                b'{"jsonrpc":"2.0","id":'
-                + str(request_id).encode("ascii")
-                + b',"method":"session.status","params":{"deep":'
-                + nested
-                + b"}}\n"
-            )
-
-        calls: list[int] = []
-        result, frames, shutdown_calls = self.run_loop(
-            deep_request(1, self.launcher.MAX_JSON_NESTING_DEPTH)
-            + deep_request(2, self.launcher.MAX_JSON_NESTING_DEPTH + 1)
-            + deep_request(3, 600)
-            + rpc_line("session.status", request_id=4),
-            lambda request: calls.append(int(request["id"])),
-        )
-
-        self.assertTrue(result)
-        self.assertEqual(calls, [4])
-        self.assertEqual(shutdown_calls, ["shutdown"])
-        self.assertEqual(
-            frames[1:4],
-            [
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "error": {"code": -32602, "message": "Invalid params"},
-                },
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32700, "message": "Parse error"},
-                },
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32700, "message": "Parse error"},
-                },
-            ],
-        )
-
-    def test_server_dispatch_is_bound_through_a_two_argument_closure(self) -> None:
-        emitted = threading.Event()
-        allow_late_write = threading.Event()
-        request_line = rpc_line("session.status", request_id=8)
-
-        class CoordinatedInput:
-            def __init__(self) -> None:
-                self.reads = 0
-
-            def readline(self, _size: int) -> bytes:
-                self.reads += 1
-                if self.reads == 1:
-                    return request_line
-                self.assert_async_emission_completed()
-                return b""
-
-            @staticmethod
-            def assert_async_emission_completed() -> None:
-                if not emitted.wait(timeout=2):
-                    raise AssertionError("async server emission did not complete")
-
-        input_stream = CoordinatedInput()
-        output = io.BytesIO()
-        transport = self.launcher.SafeJsonTransport(output, self.capability())
-        calls: list[tuple[dict[str, object], object]] = []
-        async_outcomes: list[bool] = []
-        late_outcomes: list[bool] = []
-        workers: list[threading.Thread] = []
-
-        class FakeServer:
-            def dispatch(
-                self,
-                request: dict[str, object],
-                bound_transport=None,
-            ):
-                calls.append((request, bound_transport))
-
-                def emit_async_response() -> None:
-                    async_outcomes.append(
-                        bound_transport.write(
-                            {"jsonrpc": "2.0", "id": request["id"], "result": {}}
-                        )
-                    )
-                    emitted.set()
-
-                def try_late_event() -> None:
-                    allow_late_write.wait(timeout=2)
-                    late_outcomes.append(
-                        bound_transport.write(
-                            {
-                                "jsonrpc": "2.0",
-                                "method": "event",
-                                "params": {"type": "late"},
-                            }
-                        )
-                    )
-
-                workers.extend(
-                    [
-                        threading.Thread(target=emit_async_response),
-                        threading.Thread(target=try_late_event),
-                    ]
-                )
-                for worker in workers:
-                    worker.start()
-                return None
-
-        dispatcher = self.launcher.bind_server_dispatch(FakeServer(), transport)
-        result = self.launcher.run_ndjson_loop(
-            input_stream,
-            transport,
-            dispatcher,
-            lambda: None,
-            self.policy_context(),
-        )
-        allow_late_write.set()
-        for worker in workers:
-            worker.join(timeout=2)
-
-        self.assertTrue(result)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0]["method"], "session.status")
-        self.assertIs(calls[0][1], transport)
-        self.assertEqual(async_outcomes, [True])
-        self.assertEqual(late_outcomes, [False])
-        frames = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual(frames[1], {"jsonrpc": "2.0", "id": 8, "result": {}})
-
-    def test_loop_closes_owned_transport_after_shutdown_on_every_exit(self) -> None:
-        class TrackingTransport:
-            def __init__(self, *, ready_succeeds: bool = True) -> None:
-                self.ready_succeeds = ready_succeeds
-                self.write_calls = 0
-                self.close_calls = 0
-                self.order: list[str] = []
-
-            def write_frame(self, _frame: object) -> bool:
-                self.write_calls += 1
-                return self.ready_succeeds or self.write_calls > 1
-
-            def close(self) -> None:
-                self.close_calls += 1
-                self.order.append("close")
-
-        class ReadFailure:
-            def readline(self, _size: int) -> bytes:
-                raise OSError("read failed")
-
-        cases = [
-            (io.BytesIO(b""), TrackingTransport()),
-            (io.BytesIO(b""), TrackingTransport(ready_succeeds=False)),
-            (ReadFailure(), TrackingTransport()),
-            (
-                io.BytesIO(b"x" * (self.launcher.MAX_NDJSON_FRAME_BYTES + 1)),
-                TrackingTransport(),
+        self.assertEqual(calls, ["bootstrap", "import", "gateway"])
+
+    def test_main_uses_generic_non_reflective_failure(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                self.launcher,
+                "bootstrap_pre_import",
+                side_effect=RuntimeError(CANARY),
             ),
-        ]
+            mock.patch.object(self.launcher.sys, "stderr", stderr),
+        ):
+            result = self.launcher.main()
 
-        for input_stream, transport in cases:
-            with self.subTest(
-                input_type=type(input_stream).__name__, writes=transport.write_calls
-            ):
+        self.assertEqual(result, self.launcher.EX_CONFIG)
+        self.assertEqual(stderr.getvalue(), self.launcher.GENERIC_STDERR)
+        self.assertNotIn(CANARY, stderr.getvalue())
 
-                def shutdown() -> None:
-                    transport.order.append("shutdown")
+    def test_isolated_process_ignores_python_injection_before_fd_refusal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            marker = root / "sitecustomize-ran"
+            (root / "sitecustomize.py").write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).write_text('unsafe')\n",
+                encoding="utf-8",
+            )
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HERMES_HOME": str(root / "home"),
+                "PYTHONPATH": str(root),
+                "OPENAI_API_KEY": CANARY,
+            }
+            (root / "home").mkdir(mode=0o700)
+            result = subprocess.run(
+                [sys.executable, "-I", "-S", "-B", "-u", "-X", "utf8", str(LAUNCHER)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=3,
+            )
 
-                self.launcher.run_ndjson_loop(
-                    input_stream,
-                    transport,
-                    lambda _request: None,
-                    shutdown,
-                    self.policy_context(),
-                )
-                self.assertEqual(transport.close_calls, 1)
-                self.assertEqual(transport.order, ["shutdown", "close"])
-
-    def test_dispatcher_none_dict_exception_and_token_output_are_safe(self) -> None:
-        calls = 0
-
-        def dispatcher(request: dict[str, object]):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return None
-            if calls == 2:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": request["id"],
-                    "result": {"secret": f"before-{CANARY}-after"},
-                }
-            raise RuntimeError(f"dispatcher exploded {CANARY}")
-
-        result, frames, _ = self.run_loop(
-            rpc_line("session.status", request_id=1)
-            + rpc_line("session.status", request_id=2)
-            + rpc_line("session.status", request_id=3),
-            dispatcher,
-        )
-
-        self.assertTrue(result)
-        self.assertEqual(
-            frames[1],
-            {
-                "jsonrpc": "2.0",
-                "id": 2,
-                "result": {"secret": "before-<redacted>-after"},
-            },
-        )
-        self.assertEqual(
-            frames[2],
-            {
-                "jsonrpc": "2.0",
-                "id": 3,
-                "error": {"code": -32603, "message": "Internal error"},
-            },
-        )
-        rendered = json.dumps(frames)
-        self.assertNotIn(CANARY, rendered)
-        self.assertNotIn("dispatcher exploded", rendered)
-
-    def test_oversize_input_emits_fixed_failure_terminates_and_never_dispatches(
-        self,
-    ) -> None:
-        oversized = b"x" * (self.launcher.MAX_NDJSON_FRAME_BYTES + 1)
-        calls: list[str] = []
-        result, frames, shutdown_calls = self.run_loop(
-            oversized + rpc_line("session.status", request_id=2),
-            lambda request: calls.append(str(request["method"])),
-        )
-
-        self.assertFalse(result)
-        self.assertEqual(calls, [])
-        self.assertEqual(shutdown_calls, ["shutdown"])
-        self.assertEqual(len(frames), 2)
-        self.assertEqual(
-            frames[1],
-            {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32600, "message": "Invalid Request"},
-            },
-        )
-
-    def test_ready_write_failure_terminates_without_reading_and_shutdown_runs_once(
-        self,
-    ) -> None:
-        class ExplodingInput:
-            def readline(self, _size: int) -> bytes:
-                raise AssertionError(
-                    "input must not be read when ready cannot be written"
-                )
-
-        class RejectingTransport:
-            def __init__(self) -> None:
-                self.frames: list[object] = []
-
-            def write_frame(self, frame: object) -> bool:
-                self.frames.append(frame)
-                return False
-
-        transport = RejectingTransport()
-        shutdown_calls: list[str] = []
-        result = self.launcher.run_ndjson_loop(
-            ExplodingInput(),
-            transport,
-            lambda _request: (_ for _ in ()).throw(AssertionError("dispatch")),
-            lambda: shutdown_calls.append("shutdown"),
-            self.policy_context(),
-        )
-
-        self.assertFalse(result)
-        self.assertEqual(transport.frames, [self.launcher.READY_ENVELOPE])
-        self.assertEqual(shutdown_calls, ["shutdown"])
+            self.assertEqual(result.returncode, self.launcher.EX_CONFIG)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, self.launcher.GENERIC_STDERR)
+            self.assertFalse(marker.exists())
+            self.assertNotIn(CANARY, result.stderr)
 
 
 class SourceBoundaryTests(unittest.TestCase):
-    def test_preimport_source_contains_only_standard_library_imports(self) -> None:
-        tree = ast.parse(LAUNCHER.read_text(encoding="utf-8"), filename=str(LAUNCHER))
-        imported_roots: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported_roots.update(
-                    alias.name.partition(".")[0] for alias in node.names
-                )
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported_roots.add(node.module.partition(".")[0])
-
-        allowed = set(sys.stdlib_module_names) | {"__future__"}
-        self.assertEqual(imported_roots - allowed, set())
-
-    def test_source_does_not_import_hermes_or_offer_a_test_mode_escape_hatch(
-        self,
-    ) -> None:
+    def test_launcher_has_no_quarantine_runtime_or_audit_hook(self) -> None:
         source = LAUNCHER.read_text(encoding="utf-8")
-        self.assertNotIn("import tui_gateway", source)
-        self.assertNotIn("import hermes", source)
-        self.assertNotIn("OPENTRAD_TEST", source)
+        self.assertNotIn("opentrad_hermes_runtime", source)
+        self.assertNotIn("sys.addaudithook", source)
+        self.assertNotIn("brokerPort", source)
+        self.assertNotIn("HERMES_SAFE_MODE", source)
+        self.assertIn("tui_gateway.entry", source)
+
+    def test_launcher_stays_small_enough_to_audit(self) -> None:
+        source = LAUNCHER.read_text(encoding="utf-8")
+        self.assertLessEqual(len(source.splitlines()), 960)
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main()

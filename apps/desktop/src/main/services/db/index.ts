@@ -4,6 +4,7 @@
 
 import type Database from "better-sqlite3";
 import { AgentEventService } from "./agent-events";
+import { AgentRuntimeBindingService } from "./agent-runtime-bindings";
 import { AgentSessionService } from "./agent-sessions";
 import { AuditLogService } from "./audit-log";
 import { EventService } from "./events";
@@ -24,6 +25,7 @@ export interface DbServices {
   auditLog: AuditLogService;
   providerProfiles: ProviderProfileService;
   agentEvents: AgentEventService;
+  agentRuntimeBindings: AgentRuntimeBindingService;
   agentSessions: AgentSessionService;
   close: () => void;
 }
@@ -40,6 +42,7 @@ export function createDbServices(opts: OpenDbOptions = {}): DbServices {
     auditLog: new AuditLogService(db),
     providerProfiles: new ProviderProfileService(db),
     agentEvents: new AgentEventService(db),
+    agentRuntimeBindings: new AgentRuntimeBindingService(db),
     agentSessions: new AgentSessionService(db),
     close: () => {
       // foreign_keys 在 close 时自动 release；DELETE journal mode 不留 -wal/-shm
@@ -53,6 +56,13 @@ export {
   type AgentEventRow,
   AgentEventService,
 } from "./agent-events";
+export {
+  type AgentRuntimeBindingAttachInput,
+  type AgentRuntimeBindingCreateInput,
+  type AgentRuntimeBindingRow,
+  AgentRuntimeBindingService,
+  type AgentRuntimeBindingStatusInput,
+} from "./agent-runtime-bindings";
 export { type AgentSessionRow, AgentSessionService } from "./agent-sessions";
 export { AuditLogService } from "./audit-log";
 export { EventService } from "./events";

@@ -67,7 +67,7 @@ export const AgentUsageEventSchema = z.object({
   estimatedCostUsd: z.number().nullable(),
 });
 
-// 会话结束（单轮任务完成 / 预算触顶 / 步数上限 / 用户中止）
+// 单轮运行结束（完成 / 预算触顶 / 步数上限 / 用户中止）；不代表对话会话被关闭。
 export const AgentSessionResultEventSchema = z.object({
   type: z.literal("agent_session_result"),
   sessionId: z.string(),

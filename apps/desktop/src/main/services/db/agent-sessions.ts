@@ -1,6 +1,7 @@
 // AgentSessionService：agent_sessions 表（会话元数据）。
 // 供侧栏「任务」历史列表 + 标题展示。会话内容在 agent_events（含用户消息）。
 
+import type { AgentSessionStatus } from "@opentrad/shared";
 import type Database from "better-sqlite3";
 
 export interface AgentSessionRow {
@@ -8,6 +9,10 @@ export interface AgentSessionRow {
   title: string | null;
   model: string | null;
   createdAt: number;
+  profileId?: string;
+  workspaceRoot?: string;
+  status?: AgentSessionStatus;
+  resumable?: boolean;
 }
 
 interface AgentSessionRawRow {
@@ -15,6 +20,10 @@ interface AgentSessionRawRow {
   title: string | null;
   model: string | null;
   created_at: number;
+  profile_id: string | null;
+  workspace_root: string | null;
+  status: AgentSessionStatus | null;
+  resumable: number | null;
 }
 
 export class AgentSessionService {
@@ -32,8 +41,20 @@ export class AgentSessionService {
     this.stmtSetTitleIfEmpty = db.prepare<[string, string]>(
       `UPDATE agent_sessions SET title = ? WHERE session_id = ? AND (title IS NULL OR title = '')`,
     );
-    this.stmtList = db.prepare(`SELECT * FROM agent_sessions ORDER BY created_at DESC LIMIT 100`);
-    this.stmtGet = db.prepare<[string]>(`SELECT * FROM agent_sessions WHERE session_id = ?`);
+    this.stmtList = db.prepare(
+      `SELECT sessions.*, bindings.profile_id, bindings.workspace_root,
+              bindings.status, bindings.resumable
+       FROM agent_sessions AS sessions
+       LEFT JOIN agent_runtime_bindings AS bindings USING (session_id)
+       ORDER BY sessions.created_at DESC LIMIT 100`,
+    );
+    this.stmtGet = db.prepare<[string]>(
+      `SELECT sessions.*, bindings.profile_id, bindings.workspace_root,
+              bindings.status, bindings.resumable
+       FROM agent_sessions AS sessions
+       LEFT JOIN agent_runtime_bindings AS bindings USING (session_id)
+       WHERE sessions.session_id = ?`,
+    );
     this.stmtDelete = db.prepare<[string]>(`DELETE FROM agent_sessions WHERE session_id = ?`);
   }
 
@@ -60,10 +81,22 @@ export class AgentSessionService {
 }
 
 function mapRow(raw: AgentSessionRawRow): AgentSessionRow {
-  return {
+  const row: AgentSessionRow = {
     sessionId: raw.session_id,
     title: raw.title,
     model: raw.model,
     createdAt: raw.created_at,
   };
+  if (
+    raw.profile_id !== null &&
+    raw.workspace_root !== null &&
+    raw.status !== null &&
+    raw.resumable !== null
+  ) {
+    row.profileId = raw.profile_id;
+    row.workspaceRoot = raw.workspace_root;
+    row.status = raw.status;
+    row.resumable = raw.resumable === 1;
+  }
+  return row;
 }

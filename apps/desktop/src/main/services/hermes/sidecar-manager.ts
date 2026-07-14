@@ -18,18 +18,24 @@ import type {
   HermesGatewayRequestResult,
 } from "./gateway-protocol";
 import { verifyHermesInstallation } from "./installation";
+import type { HermesNetworkEnvironment } from "./network-environment";
 import {
   ensureHermesStateDirs,
   type HermesPaths,
   type HermesPlatform,
-  resolveHermesPaths,
+  resolveHermesProfilePaths,
 } from "./paths";
+import type { HermesProfileHomeInitializer } from "./profile-home";
 import {
   createHermesSidecarTerminator,
   type HermesSidecarTerminationOptions,
   validateHermesSidecarTerminationOptions,
 } from "./sidecar-process-tree";
-import { createHermesGatewaySpawnSpec, type HermesGatewaySpawnSpec } from "./spawn-spec";
+import {
+  createHermesGatewaySpawnSpec,
+  type HermesGatewaySpawnSpec,
+  isHermesGatewayEnvironment,
+} from "./spawn-spec";
 
 export type HermesSidecarState = "idle" | "starting" | "ready" | "stopping" | "stopped" | "crashed";
 
@@ -97,8 +103,11 @@ export interface HermesSidecarBinding {
   readonly taskId: string;
   readonly runId: string;
   readonly profileId: string;
+  readonly providerSlug: string;
+  readonly authMode: "api_key" | "oauth";
   readonly model: string;
   readonly apiMode: ProviderApiMode;
+  readonly executionBackend: "local" | "docker";
 }
 
 export interface HermesSidecarCapabilityLease {
@@ -116,17 +125,25 @@ export interface HermesSidecarManagerOptions {
   /** One manager owns exactly one task/run process; never share it across bindings. */
   readonly binding: HermesSidecarBinding;
   readonly dataRoot: string;
+  readonly workspaceRoot: string;
   readonly issueCapability: HermesSidecarCapabilityIssuer;
   readonly launcherPath: string;
   readonly platform?: HermesPlatform;
   readonly paths?: HermesPaths;
   readonly ensureStateDirs?: typeof ensureHermesStateDirs;
+  readonly initializeProfileHome: HermesProfileHomeInitializer;
+  readonly networkEnvironment?: HermesNetworkEnvironment;
   readonly verifyInstallation?: (
     pythonExecutable: string,
     spawnSpec: HermesGatewaySpawnSpec,
   ) => Promise<unknown>;
   readonly spawn?: HermesSidecarSpawn;
-  readonly spawnSpecFactory?: (paths: HermesPaths, launcherPath: string) => HermesGatewaySpawnSpec;
+  readonly spawnSpecFactory?: (
+    paths: HermesPaths,
+    launcherPath: string,
+    workspaceRoot: string,
+    networkEnvironment?: HermesNetworkEnvironment,
+  ) => HermesGatewaySpawnSpec;
   readonly clientFactory?: (options: HermesGatewayClientOptions) => HermesSidecarClient;
   readonly terminatorFactory?: HermesSidecarTerminatorFactory;
   readonly terminationOptions?: HermesSidecarTerminationOptions;
@@ -184,11 +201,13 @@ const MAX_CAPABILITY_TIMEOUT_MS = 5_000;
 export class HermesSidecarManager {
   private readonly binding: HermesSidecarBinding;
   private readonly dataRoot: string;
+  private readonly workspaceRoot: string;
   private readonly issueCapability: HermesSidecarCapabilityIssuer;
   private readonly launcherPath: string;
   private readonly paths: HermesPaths;
   private readonly platform: HermesPlatform;
   private readonly ensureStateDirs: typeof ensureHermesStateDirs;
+  private readonly initializeProfileHome: HermesProfileHomeInitializer;
   private readonly verifyInstallation: NonNullable<
     HermesSidecarManagerOptions["verifyInstallation"]
   >;
@@ -220,10 +239,13 @@ export class HermesSidecarManager {
     this.platform = options.platform ?? hostHermesPlatform();
     try {
       this.binding = snapshotBinding(options.binding);
+      this.workspaceRoot = requireWorkspaceRoot(options.workspaceRoot, this.platform);
       this.issueCapability = requireCapabilityIssuer(options.issueCapability);
+      this.initializeProfileHome = requireProfileHomeInitializer(options.initializeProfileHome);
       this.launcherPath = requireAbsolutePath(options.launcherPath, this.platform);
       this.paths = Object.freeze({
-        ...(options.paths ?? resolveHermesPaths(options.dataRoot, this.platform)),
+        ...(options.paths ??
+          resolveHermesProfilePaths(options.dataRoot, this.binding.profileId, this.platform)),
       });
     } catch {
       throw new HermesSidecarError("HERMES_SIDECAR_START");
@@ -234,10 +256,27 @@ export class HermesSidecarManager {
       options.clientFactory ?? ((clientOptions) => new HermesGatewayClient(clientOptions));
     this.readyTimeoutMs = options.readyTimeoutMs;
     this.capabilityTimeoutMs = boundedCapabilityTimeout(options.capabilityTimeoutMs);
-    const specFactory = options.spawnSpecFactory ?? createHermesGatewaySpawnSpec;
+    const specFactory =
+      options.spawnSpecFactory ??
+      ((paths, launcherPath, workspaceRoot, networkEnvironment) =>
+        createHermesGatewaySpawnSpec(
+          paths,
+          launcherPath,
+          workspaceRoot,
+          process.env,
+          networkEnvironment,
+        ));
     try {
-      this.spawnSpec = snapshotSpawnSpec(specFactory(this.paths, this.launcherPath));
-      validateSpawnSpec(this.spawnSpec, this.paths, this.launcherPath, this.platform);
+      this.spawnSpec = snapshotSpawnSpec(
+        specFactory(this.paths, this.launcherPath, this.workspaceRoot, options.networkEnvironment),
+      );
+      validateSpawnSpec(
+        this.spawnSpec,
+        this.paths,
+        this.launcherPath,
+        this.workspaceRoot,
+        this.platform,
+      );
     } catch {
       throw new HermesSidecarError("HERMES_SIDECAR_START");
     }
@@ -540,6 +579,8 @@ export class HermesSidecarManager {
       }
       this.throwIfCanceled(command);
       await this.ensureStateDirs(this.paths, { dataRoot: this.dataRoot });
+      this.throwIfCanceled(command);
+      await this.initializeProfileHome(this.binding, this.paths);
       this.throwIfCanceled(command);
       await this.verifyInstallation(this.paths.pythonExecutable, this.spawnSpec);
       this.throwIfCanceled(command);
@@ -890,6 +931,7 @@ function validateSpawnSpec(
   spec: HermesGatewaySpawnSpec,
   paths: HermesPaths,
   launcherPath: string,
+  workspaceRoot: string,
   platform: HermesPlatform,
 ): void {
   const isPlatformAbsolute = platform === "win32" ? win32.isAbsolute : isAbsolute;
@@ -906,11 +948,7 @@ function validateSpawnSpec(
     spec.args[4] !== "-X" ||
     spec.args[5] !== "utf8" ||
     spec.args[6] !== launcherPath ||
-    spec.env.HERMES_HOME !== paths.hermesHome ||
-    Object.keys(spec.env).length !== 1 ||
-    Object.entries(spec.env).some(
-      ([key, value]) => typeof value !== "string" || key !== "HERMES_HOME",
-    )
+    !isHermesGatewayEnvironment(spec.env, paths.hermesHome, workspaceRoot, paths.runtimeRoot)
   ) {
     throw new HermesSidecarError("HERMES_SIDECAR_START");
   }
@@ -923,8 +961,11 @@ function snapshotBinding(binding: HermesSidecarBinding): HermesSidecarBinding {
   const taskId = binding.taskId;
   const runId = binding.runId;
   const profileId = binding.profileId;
+  const providerSlug = binding.providerSlug;
+  const authMode = binding.authMode;
   const model = binding.model;
   const apiMode = binding.apiMode;
+  const executionBackend = binding.executionBackend;
   if (
     typeof taskId !== "string" ||
     !BINDING_ID_PATTERN.test(taskId) ||
@@ -932,9 +973,13 @@ function snapshotBinding(binding: HermesSidecarBinding): HermesSidecarBinding {
     !BINDING_ID_PATTERN.test(runId) ||
     typeof profileId !== "string" ||
     !BINDING_ID_PATTERN.test(profileId) ||
+    typeof providerSlug !== "string" ||
+    !BINDING_ID_PATTERN.test(providerSlug) ||
+    (authMode !== "api_key" && authMode !== "oauth") ||
     typeof model !== "string" ||
     !BINDING_MODEL_PATTERN.test(model) ||
-    (apiMode !== "chat_completions" && apiMode !== "codex_responses")
+    (apiMode !== "chat_completions" && apiMode !== "codex_responses") ||
+    (executionBackend !== "local" && executionBackend !== "docker")
   ) {
     throw new HermesSidecarError("HERMES_SIDECAR_START");
   }
@@ -942,8 +987,11 @@ function snapshotBinding(binding: HermesSidecarBinding): HermesSidecarBinding {
     taskId,
     runId,
     profileId,
+    providerSlug,
+    authMode,
     model,
     apiMode,
+    executionBackend,
   });
 }
 
@@ -955,12 +1003,35 @@ function requireCapabilityIssuer(value: unknown): HermesSidecarCapabilityIssuer 
   return async (binding) => Reflect.apply(issuer, undefined, [binding]);
 }
 
+function requireProfileHomeInitializer(value: unknown): HermesProfileHomeInitializer {
+  if (typeof value !== "function") {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  const initialize = value;
+  return async (binding, paths) => {
+    await Reflect.apply(initialize, undefined, [binding, paths]);
+  };
+}
+
 function requireAbsolutePath(value: unknown, platform: HermesPlatform): string {
   const isPlatformAbsolute = platform === "win32" ? win32.isAbsolute : isAbsolute;
   if (typeof value !== "string" || !isPlatformAbsolute(value)) {
     throw new HermesSidecarError("HERMES_SIDECAR_START");
   }
   return value;
+}
+
+function requireWorkspaceRoot(value: unknown, platform: HermesPlatform): string {
+  const workspaceRoot = requireAbsolutePath(value, platform);
+  if (
+    workspaceRoot.length > 4_096 ||
+    workspaceRoot.includes("\0") ||
+    workspaceRoot.includes("\n") ||
+    workspaceRoot.includes("\r")
+  ) {
+    throw new HermesSidecarError("HERMES_SIDECAR_START");
+  }
+  return workspaceRoot;
 }
 
 function boundedCapabilityTimeout(value: number | undefined): number {

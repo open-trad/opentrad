@@ -21,14 +21,16 @@ import { ipcMain } from "electron";
 import type { DetectLoopRegistry } from "../services/cc-detect-loop";
 import { getAutoInstallCommand, getPlatformInstallSupport } from "../services/installer";
 import type { PtyManager } from "../services/pty-manager";
+import type { PtySubscriberRouter } from "../services/pty-subscriber-router";
 
 export interface InstallerHandlerDeps {
   pty: PtyManager;
+  ptyRouter: PtySubscriberRouter;
   detectLoop: DetectLoopRegistry;
 }
 
 export function registerInstallerHandlers(deps: InstallerHandlerDeps): void {
-  const { pty, detectLoop } = deps;
+  const { ptyRouter, detectLoop } = deps;
 
   ipcMain.handle(
     IpcChannels.InstallerSupportsAutoInstall,
@@ -47,14 +49,16 @@ export function registerInstallerHandlers(deps: InstallerHandlerDeps): void {
         );
       }
       const cmd = getAutoInstallCommand();
-      const ptyId = pty.spawn({
-        command: cmd.command,
-        args: cmd.args,
-      });
+      const ptyId = ptyRouter.spawnAndBind(
+        {
+          command: cmd.command,
+          args: cmd.args,
+        },
+        event.sender,
+      );
       // PTY 输出已通过 #20 的 PtyData / PtyExit 事件路由到 renderer
       // （renderer 用 TerminalPane 订阅同款 ptyId）
       // webContents 销毁时 #20 会自动 kill 该 PTY，无需在此重复
-      void event;
       return { ptyId };
     },
   );

@@ -4,6 +4,7 @@ import { isAbsolute, win32 } from "node:path";
 import type { HermesCommandRunner } from "./installation";
 
 export const HERMES_COMMAND_TIMEOUT_MS = 5_000;
+export const HERMES_COMMAND_MAX_TIMEOUT_MS = 15 * 60_000;
 export const HERMES_COMMAND_MAX_BUFFER_BYTES = 64 * 1024;
 export const HERMES_COMMAND_CLEANUP_GRACE_MS = 1_000;
 
@@ -73,7 +74,7 @@ export function createHermesCommandRunner(
   const timeoutMs = options.timeoutMs ?? HERMES_COMMAND_TIMEOUT_MS;
   const maxBufferBytes = options.maxBufferBytes ?? HERMES_COMMAND_MAX_BUFFER_BYTES;
   if (
-    !isSafePositiveIntegerAtMost(timeoutMs, HERMES_COMMAND_TIMEOUT_MS) ||
+    !isSafePositiveIntegerAtMost(timeoutMs, HERMES_COMMAND_MAX_TIMEOUT_MS) ||
     !isSafePositiveIntegerAtMost(maxBufferBytes, HERMES_COMMAND_MAX_BUFFER_BYTES)
   ) {
     throw new HermesCommandExecutionError("HERMES_COMMAND_INVALID", "requires bounded limits");

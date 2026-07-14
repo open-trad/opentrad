@@ -20,7 +20,7 @@ export type RiskGateRequest = z.infer<typeof RiskGateRequestSchema>;
 // Risk Gate 决策结果（由用户在 UI 弹窗或历史规则产生）。
 // timestamp 用 epoch ms，方便写 JSONL 审计日志和按时间查询。
 export const RiskGateDecisionSchema = z.object({
-  decision: z.enum(["allow", "deny", "allow_once", "allow_always"]),
+  decision: z.enum(["allow", "deny", "allow_once", "allow_session", "allow_always"]),
   reason: z.string().optional(),
   timestamp: z.number().int(),
 });
@@ -52,6 +52,7 @@ export type RiskGateConfirmPayload = z.infer<typeof RiskGateConfirmPayloadSchema
 
 export const UserDecisionKindSchema = z.enum([
   "allow_once",
+  "allow_session",
   "allow_always",
   "deny",
   "request_edit",

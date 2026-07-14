@@ -94,7 +94,7 @@ describe("resolveHermesLauncherPath", () => {
     ).not.toThrow();
   });
 
-  it("packages only the launcher and its hash-pinned sibling outside app.asar", () => {
+  it("packages only the thin launcher and pinned requirements lock outside app.asar", () => {
     const config = load(
       readFileSync(new URL("../electron-builder.yml", import.meta.url), "utf8"),
     ) as {
@@ -105,8 +105,21 @@ describe("resolveHermesLauncherPath", () => {
       {
         from: "resources/hermes",
         to: "hermes",
-        filter: ["opentrad_hermes_launcher.py", "opentrad_hermes_runtime.py"],
+        filter: ["opentrad_hermes_launcher.py", "hermes-agent-0.18.2-base-requirements.txt"],
       },
     ]);
+  });
+
+  it("repairs the Electron native ABI on every standalone macOS packaging run", () => {
+    const packageJson = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { scripts?: Record<string, string> };
+
+    expect(packageJson.scripts?.["dist:mac"]).toBe(
+      "pnpm run rebuild:electron && electron-vite build && electron-builder --mac --arm64 && pnpm run smoke:packaged",
+    );
+    expect(packageJson.scripts?.["smoke:packaged"]).toBe(
+      "node scripts/smoke-packaged-electron-dlopen.cjs",
+    );
   });
 });

@@ -19,6 +19,8 @@ export interface PtySpawnOptions {
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
+  /** Main-process only: managed login flows must not inherit arbitrary parent secrets. */
+  inheritEnv?: boolean;
   cols?: number;
   rows?: number;
 }
@@ -51,7 +53,10 @@ export class PtyManager extends EventEmitter<PtyManagerEvents> {
       cols: opts.cols ?? 80,
       rows: opts.rows ?? 24,
       cwd: opts.cwd ?? process.env.HOME ?? process.cwd(),
-      env: { ...(process.env as Record<string, string>), ...(opts.env ?? {}) },
+      env:
+        opts.inheritEnv === false
+          ? { ...(opts.env ?? {}) }
+          : { ...(process.env as Record<string, string>), ...(opts.env ?? {}) },
     });
     const ptyId = randomUUID();
     this.ptys.set(ptyId, ptyProcess);

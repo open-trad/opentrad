@@ -51,6 +51,12 @@ describe("database migration inspection", () => {
       "93bc4fdce92d08c60923c3157226ba7565504f0a032e87dccc18d5aad9a0d061",
       18,
     ],
+    [
+      "current-v2",
+      "current-v2" as const,
+      "e7c739bf25107bbe221cb450dc59cf153d3478b83e2db72bb7877efdfccfc685",
+      20,
+    ],
   ])("recognizes the reviewed %s physical schema", (_label, kind, fingerprint, objectCount) => {
     const db = openMemoryDatabase(openDatabases);
     applyHistoricalShape(db, kind);
@@ -71,7 +77,7 @@ describe("database migration inspection", () => {
 
     const inspection = inspectDatabaseForMigration(db);
 
-    expect(inspection.kind).toBe("current-v1");
+    expect(inspection.kind).toBe("current-v2");
     expect(inspection.fingerprint).toBe(before);
   });
 
@@ -91,7 +97,7 @@ describe("database migration inspection", () => {
     );
 
     expect(fingerprintDatabaseSchema(db)).toBe(before);
-    expect(inspectDatabaseForMigration(db).kind).toBe("current-v1");
+    expect(inspectDatabaseForMigration(db).kind).toBe("current-v2");
   });
 
   it.each([
@@ -152,6 +158,19 @@ describe("database migration inspection", () => {
 
     expect(error).toMatchObject({ code: "DB_MIGRATION_INSPECTION_UNAVAILABLE" });
     expect(port.calls).toEqual([]);
+  });
+
+  it("can require an active write transaction for the locked migration inspection", () => {
+    const db = openMemoryDatabase(openDatabases);
+    db.exec(SCHEMA_SQL);
+
+    expect(() => inspectDatabaseForMigration(db, { transaction: "required" })).toThrowError(
+      expect.objectContaining({ code: "DB_MIGRATION_INSPECTION_UNAVAILABLE" }),
+    );
+
+    db.exec("BEGIN IMMEDIATE");
+    expect(inspectDatabaseForMigration(db, { transaction: "required" }).kind).toBe("current-v2");
+    db.exec("ROLLBACK");
   });
 
   it("snapshots method getters before accepting the transaction state", () => {
@@ -243,10 +262,12 @@ describe("database migration inspection", () => {
   });
 });
 
-type HistoricalShape = "legacy-core-v1" | "legacy-agent-v1" | "current-v1";
+type HistoricalShape = "legacy-core-v1" | "legacy-agent-v1" | "current-v1" | "current-v2";
 
 function applyHistoricalShape(db: Database.Database, shape: HistoricalShape): void {
   db.exec(SCHEMA_SQL);
+  if (shape === "current-v2") return;
+  db.exec("DROP INDEX idx_agent_runtime_bindings_durable; DROP TABLE agent_runtime_bindings;");
   if (shape === "current-v1") return;
   db.exec("DROP INDEX idx_agent_sessions_created; DROP TABLE agent_sessions;");
   if (shape === "legacy-agent-v1") return;

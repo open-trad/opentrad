@@ -2,7 +2,7 @@
 //
 // - 列表：现有 profiles + 删除（删除时级联清凭证，见 agent store）
 // - 新增：displayName / kind / baseUrl（openai-compatible 必填）/ model / 定价（可选）/ API key
-//   API key 经 agent:credentials:set 进 main safeStorage 加密落库；本组件不回显、不留内存副本
+//   API key 随 Profile save 单次进入 main safeStorage；本组件不回显、不持久化明文
 // - credentialRef 约定：apikey:<profileId>
 
 import {
@@ -12,10 +12,76 @@ import {
   getCatalogProvider,
   PROVIDER_CATALOG,
   type ProviderProfile,
+  ProviderProfileSchema,
 } from "@opentrad/model-providers";
 import { Trash2 } from "lucide-react";
 import { type ReactElement, useEffect, useState } from "react";
 import { useAgentStore } from "../../stores/agent";
+import { HermesOAuthPtyDialog } from "./HermesOAuthPtyDialog";
+
+export type HermesOAuthProfilePresetId = "chatgpt" | "nous" | "copilot";
+
+interface HermesOAuthProfilePreset {
+  readonly id: HermesOAuthProfilePresetId;
+  readonly displayName: string;
+  readonly providerSlug: "openai-codex" | "nous" | "copilot";
+  readonly apiMode: "chat_completions" | "codex_responses";
+  readonly defaultModel: string;
+}
+
+export const HERMES_OAUTH_PROFILE_PRESETS: readonly HermesOAuthProfilePreset[] = Object.freeze([
+  Object.freeze({
+    id: "chatgpt",
+    displayName: "ChatGPT · Hermes OAuth",
+    providerSlug: "openai-codex",
+    apiMode: "codex_responses",
+    defaultModel: "gpt-5.4",
+  }),
+  Object.freeze({
+    id: "nous",
+    displayName: "Nous Portal · Hermes OAuth",
+    providerSlug: "nous",
+    apiMode: "chat_completions",
+    defaultModel: "anthropic/claude-fable-5",
+  }),
+  Object.freeze({
+    id: "copilot",
+    displayName: "GitHub Copilot · Hermes OAuth",
+    providerSlug: "copilot",
+    apiMode: "codex_responses",
+    defaultModel: "gpt-5.4",
+  }),
+]);
+
+export function createHermesOAuthProfile(
+  presetId: HermesOAuthProfilePresetId,
+  id: string,
+  model?: string,
+): ProviderProfile {
+  const preset = HERMES_OAUTH_PROFILE_PRESETS.find((candidate) => candidate.id === presetId);
+  if (!preset) throw new Error("Unsupported Hermes OAuth provider");
+  const selectedModel = model ?? preset.defaultModel;
+  if (selectedModel !== preset.defaultModel) {
+    throw new Error("Hermes OAuth model is fixed for this release");
+  }
+  return ProviderProfileSchema.parse({
+    id,
+    displayName: preset.displayName,
+    kind: "openai",
+    model: selectedModel,
+    pricing: null,
+    hermes: {
+      providerSlug: preset.providerSlug,
+      authMode: "oauth",
+      apiMode: preset.apiMode,
+      executionBackend: "local",
+    },
+  });
+}
+
+export function createChatGptOAuthProfile(id: string, model = "gpt-5.4"): ProviderProfile {
+  return createHermesOAuthProfile("chatgpt", id, model);
+}
 
 export function ProvidersTab(): ReactElement {
   const profiles = useAgentStore((s) => s.profiles);
@@ -31,6 +97,15 @@ export function ProvidersTab(): ReactElement {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [oauthProviderId, setOAuthProviderId] = useState<HermesOAuthProfilePresetId>("chatgpt");
+  const [oauthModel, setOAuthModel] = useState(
+    HERMES_OAUTH_PROFILE_PRESETS[0]?.defaultModel ?? "gpt-5.4",
+  );
+  const [oauthStarting, setOAuthStarting] = useState<string | null>(null);
+  const [oauthPty, setOAuthPty] = useState<{
+    ptyId: string;
+    profileName: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!profilesLoaded) void loadProfiles();
@@ -53,7 +128,7 @@ export function ProvidersTab(): ReactElement {
     }
     const id = crypto.randomUUID();
     const fields = catalogModelToProfileFields(provider.id, model.id);
-    const profile: ProviderProfile = {
+    const profile: ProviderProfile = ProviderProfileSchema.parse({
       id,
       displayName: `${provider.displayName} · ${model.displayName}`,
       kind: fields.kind,
@@ -61,7 +136,7 @@ export function ProvidersTab(): ReactElement {
       model: fields.model,
       credentialRef: `apikey:${id}`,
       pricing: fields.pricing,
-    };
+    });
     setSaving(true);
     try {
       await saveProfile(profile, apiKey);
@@ -83,6 +158,56 @@ export function ProvidersTab(): ReactElement {
     }
   };
 
+  const startOAuthLogin = async (profile: ProviderProfile): Promise<void> => {
+    setError(null);
+    setNotice(null);
+    setOAuthStarting(profile.id);
+    try {
+      const { ptyId } = await window.api.auth.startHermesOAuth({ profileId: profile.id });
+      setOAuthPty({ ptyId, profileName: profile.displayName });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setOAuthStarting(null);
+    }
+  };
+
+  const oauthPreset = HERMES_OAUTH_PROFILE_PRESETS.find(
+    (candidate) => candidate.id === oauthProviderId,
+  );
+
+  const handleOAuthProviderChange = (next: string): void => {
+    const preset = HERMES_OAUTH_PROFILE_PRESETS.find((candidate) => candidate.id === next);
+    if (!preset) return;
+    setOAuthProviderId(preset.id);
+    setOAuthModel(preset.defaultModel);
+  };
+
+  const createAndLoginOAuth = async (): Promise<void> => {
+    const modelName = oauthModel.trim();
+    if (!modelName) {
+      setError("模型名不能为空");
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    const profile = createHermesOAuthProfile(
+      oauthProviderId,
+      `${oauthProviderId}-${crypto.randomUUID()}`,
+      modelName,
+    );
+    setSaving(true);
+    try {
+      await saveProfile(profile);
+      setNotice(`已创建「${profile.displayName}」；请在官方流程中完成登录`);
+      await startOAuthLogin(profile);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div>
       <h3 style={sectionTitleStyle}>已有 Profiles</h3>
@@ -95,8 +220,9 @@ export function ProvidersTab(): ReactElement {
               <th style={thStyle}>名称</th>
               <th style={thStyle}>类型</th>
               <th style={thStyle}>模型</th>
+              <th style={thStyle}>认证</th>
               <th style={thStyle}>定价 ($/MTok)</th>
-              <th style={{ ...thStyle, width: 50 }} />
+              <th style={{ ...thStyle, width: 150 }} />
             </tr>
           </thead>
           <tbody>
@@ -109,19 +235,32 @@ export function ProvidersTab(): ReactElement {
                 <td style={tdStyle}>
                   <code style={codeStyle}>{p.model}</code>
                 </td>
+                <td style={tdStyle}>{p.hermes.authMode === "oauth" ? "OAuth" : "API Key"}</td>
                 <td style={tdStyle}>
                   {p.pricing ? `${p.pricing.inputPerMTokUsd} / ${p.pricing.outputPerMTokUsd}` : "—"}
                 </td>
                 <td style={tdStyle}>
-                  <button
-                    type="button"
-                    onClick={() => void handleDelete(p.id)}
-                    style={iconBtnStyle}
-                    aria-label="删除 profile"
-                    title="删除（凭证一并清除）"
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    {p.hermes.authMode === "oauth" ? (
+                      <button
+                        type="button"
+                        onClick={() => void startOAuthLogin(p)}
+                        disabled={oauthStarting === p.id}
+                        style={smallButtonStyle}
+                      >
+                        {oauthStarting === p.id ? "启动中…" : "登录/重新登录"}
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => void handleDelete(p.id)}
+                      style={iconBtnStyle}
+                      aria-label="删除 profile"
+                      title="删除（凭证一并清除）"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -129,7 +268,47 @@ export function ProvidersTab(): ReactElement {
         </table>
       )}
 
-      <h3 style={{ ...sectionTitleStyle, marginTop: "1.5rem" }}>接入模型</h3>
+      <h3 style={{ ...sectionTitleStyle, marginTop: "1.5rem" }}>订阅登录（Hermes OAuth）</h3>
+      <div style={formGridStyle}>
+        <label style={labelStyle}>
+          Provider
+          <select
+            value={oauthProviderId}
+            onChange={(event) => handleOAuthProviderChange(event.target.value)}
+            style={inputStyle}
+          >
+            {HERMES_OAUTH_PROFILE_PRESETS.map((preset) => (
+              <option key={preset.id} value={preset.id}>
+                {preset.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label style={{ ...labelStyle, gridColumn: "1 / -1" }}>
+          模型
+          <input
+            value={oauthModel}
+            onChange={(event) => setOAuthModel(event.target.value)}
+            readOnly
+            style={inputStyle}
+            autoComplete="off"
+          />
+        </label>
+      </div>
+      <p style={{ fontSize: "0.78rem", color: "#64748b", margin: "0 0 0.8rem" }}>
+        使用固定 Hermes 0.18.2 的官方 {oauthPreset?.displayName ?? "OAuth"} 流程。OpenTrad
+        不要求、读取或复制 token，登录态只保存在此 Profile 的私有 HERMES_HOME。
+      </p>
+      <button
+        type="button"
+        onClick={() => void createAndLoginOAuth()}
+        disabled={saving || oauthStarting !== null}
+        style={{ ...primaryBtnStyle, opacity: saving || oauthStarting !== null ? 0.6 : 1 }}
+      >
+        创建 {oauthPreset?.displayName ?? "OAuth"} Profile 并登录
+      </button>
+
+      <h3 style={{ ...sectionTitleStyle, marginTop: "1.5rem" }}>API Key 接入模型</h3>
       <div style={formGridStyle}>
         <label style={labelStyle}>
           厂商
@@ -182,6 +361,13 @@ export function ProvidersTab(): ReactElement {
       </button>
       {error ? <p style={{ color: "#b91c1c", fontSize: "0.8rem" }}>{error}</p> : null}
       {notice ? <p style={{ color: "#166534", fontSize: "0.8rem" }}>{notice}</p> : null}
+      {oauthPty ? (
+        <HermesOAuthPtyDialog
+          ptyId={oauthPty.ptyId}
+          profileName={oauthPty.profileName}
+          onClose={() => setOAuthPty(null)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -275,4 +461,15 @@ const primaryBtnStyle: React.CSSProperties = {
   cursor: "pointer",
   fontSize: "0.85rem",
   fontFamily: "inherit",
+};
+
+const smallButtonStyle: React.CSSProperties = {
+  border: "1px solid #bfdbfe",
+  borderRadius: 5,
+  background: "#eff6ff",
+  color: "#1d4ed8",
+  padding: "0.25rem 0.45rem",
+  cursor: "pointer",
+  fontSize: "0.72rem",
+  whiteSpace: "nowrap",
 };

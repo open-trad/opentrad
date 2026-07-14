@@ -9,12 +9,38 @@
 // Profile 管理入口在 Settings → Providers（ProvidersTab）。
 
 import type { ProviderProfile } from "@opentrad/model-providers";
-import { Bot, Send, Square } from "lucide-react";
+import type { HermesRuntimeInstallProgress } from "@opentrad/shared";
+import { Bot, RefreshCw, Send, Square } from "lucide-react";
 import { type ReactElement, useEffect, useRef, useState } from "react";
 import { MessageBubble } from "../../components/chat/MessageBubble";
 import { ToolCallCard } from "../../components/chat/ToolCallCard";
 import { ToolResultCard } from "../../components/chat/ToolResultCard";
-import { type AgentChatItem, useAgentStore } from "../../stores/agent";
+import {
+  type AgentChatItem,
+  type AgentConversationContinuation,
+  useAgentStore,
+} from "../../stores/agent";
+
+export function agentConversationComposerState(continuation: AgentConversationContinuation): {
+  disabled: boolean;
+  placeholder: string;
+  action: "send" | "recovering" | "retry" | "historical";
+} {
+  switch (continuation) {
+    case "ready":
+      return { disabled: false, placeholder: "输入消息，Enter 发送", action: "send" };
+    case "recovering":
+      return { disabled: true, placeholder: "正在恢复会话…", action: "recovering" };
+    case "retryable":
+      return { disabled: true, placeholder: "会话暂时断开，请重试恢复", action: "retry" };
+    case "historical":
+      return {
+        disabled: true,
+        placeholder: "这条旧记录缺少可恢复的运行时会话",
+        action: "historical",
+      };
+  }
+}
 
 export function AgentChatPanel(): ReactElement {
   const sessionId = useAgentStore((s) => s.sessionId);
@@ -43,11 +69,13 @@ function SessionSetup({
   error: string | null;
 }): ReactElement {
   const startSession = useAgentStore((s) => s.startSession);
+  const runtimeInstallProgress = useAgentStore((s) => s.runtimeInstallProgress);
   const [profileId, setProfileId] = useState("");
   const [mcpCommand, setMcpCommand] = useState("");
   const [starting, setStarting] = useState(false);
 
   const effectiveProfileId = profileId || profiles[0]?.id || "";
+  const selectedProfile = profiles.find((profile) => profile.id === effectiveProfileId);
 
   const handleStart = async (): Promise<void> => {
     if (!effectiveProfileId) return;
@@ -75,13 +103,11 @@ function SessionSetup({
       <div style={setupCardStyle}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
           <Bot size={18} aria-hidden="true" />
-          <h2 style={{ margin: 0, fontSize: "1.05rem", color: "#111827" }}>
-            Agent 对话（M0 spike）
-          </h2>
+          <h2 style={{ margin: 0, fontSize: "1.05rem", color: "#111827" }}>Hermes Agent</h2>
         </div>
         <p style={{ margin: "0.4rem 0 1rem", fontSize: "0.82rem", color: "#6b7280" }}>
-          自建 agent loop：纯 API key 直连，工具调用统一过 Risk Gate。Profile 在设置 → Providers
-          里管理。
+          Hermes 原生会话、恢复、tools、skills 与 plugins；OpenTrad 负责工作区验证、审批和审计。
+          Profile 在设置 → Providers 里管理。
         </p>
 
         {profiles.length === 0 ? (
@@ -104,6 +130,7 @@ function SessionSetup({
                 ))}
               </select>
             </label>
+            {selectedProfile ? <HermesExecutionBackendNotice profile={selectedProfile} /> : null}
             <label style={fieldLabelStyle}>
               MCP server 命令（可选，如 bb-browser）
               <input
@@ -122,10 +149,60 @@ function SessionSetup({
             >
               {starting ? "创建中…" : "新建会话"}
             </button>
+            {starting && runtimeInstallProgress ? (
+              <HermesRuntimeInstallProgressNotice progress={runtimeInstallProgress} />
+            ) : null}
           </>
         )}
         {error ? <div style={errorLineStyle}>{error}</div> : null}
       </div>
+    </div>
+  );
+}
+
+type HermesRuntimeInstallArtifact = Extract<
+  HermesRuntimeInstallProgress,
+  { artifact: string }
+>["artifact"];
+
+const RUNTIME_INSTALL_PHASE_LABELS: Record<HermesRuntimeInstallProgress["phase"], string> = {
+  checking: "正在检查运行时",
+  downloading: "正在下载",
+  "verifying-download": "正在校验下载",
+  preparing: "正在准备运行时",
+  installing: "正在安装 Hermes",
+  "verifying-runtime": "正在校验运行时",
+  switching: "正在激活运行时",
+  ready: "Hermes 运行时已就绪",
+};
+
+const RUNTIME_INSTALL_ARTIFACT_LABELS: Record<HermesRuntimeInstallArtifact, string> = {
+  cpython: "CPython 3.12",
+  uv: "uv",
+  "hermes-wheel": "Hermes wheel",
+  "requirements-lock": "固定依赖",
+  "hermes-source": "Hermes 内建 skills",
+};
+
+export function HermesRuntimeInstallProgressNotice({
+  progress,
+}: {
+  progress: HermesRuntimeInstallProgress;
+}): ReactElement {
+  const artifact =
+    "artifact" in progress ? RUNTIME_INSTALL_ARTIFACT_LABELS[progress.artifact] : null;
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      data-runtime-install-phase={progress.phase}
+      style={runtimeInstallProgressStyle}
+    >
+      <strong>受管 Hermes 运行时</strong>
+      <span>
+        {RUNTIME_INSTALL_PHASE_LABELS[progress.phase]}
+        {artifact ? ` · ${artifact}` : ""}
+      </span>
     </div>
   );
 }
@@ -135,14 +212,20 @@ function SessionSetup({
 function ChatView(): ReactElement {
   const items = useAgentStore((s) => s.items);
   const running = useAgentStore((s) => s.running);
-  const ended = useAgentStore((s) => s.ended);
+  const continuation = useAgentStore((s) => s.continuation);
   const sessionModel = useAgentStore((s) => s.sessionModel);
   const sessionTools = useAgentStore((s) => s.sessionTools);
   const totalCostUsd = useAgentStore((s) => s.totalCostUsd);
   const error = useAgentStore((s) => s.error);
   const sendMessage = useAgentStore((s) => s.sendMessage);
+  const retrySession = useAgentStore((s) => s.retrySession);
   const abort = useAgentStore((s) => s.abort);
   const resetSession = useAgentStore((s) => s.resetSession);
+  const profiles = useAgentStore((s) => s.profiles);
+  const sessionProfileId = useAgentStore((s) => s.sessionProfileId);
+  const workspaceRoot = useAgentStore((s) => s.workspaceRoot);
+  const sessionProfile = profiles.find((profile) => profile.id === sessionProfileId);
+  const composer = agentConversationComposerState(continuation);
 
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -155,7 +238,7 @@ function ChatView(): ReactElement {
 
   const handleSend = (): void => {
     const text = draft.trim();
-    if (!text || running || ended) return;
+    if (!text || running || composer.disabled) return;
     setDraft("");
     void sendMessage(text);
   };
@@ -175,9 +258,13 @@ function ChatView(): ReactElement {
           ) : null}
         </div>
         <button type="button" onClick={resetSession} style={secondaryBtnStyle}>
-          结束并新建
+          新建任务
         </button>
       </header>
+
+      {sessionProfile ? (
+        <HermesExecutionBackendNotice profile={sessionProfile} workspaceRoot={workspaceRoot} />
+      ) : null}
 
       <div style={chatScrollStyle}>
         {items.length === 0 ? (
@@ -209,8 +296,8 @@ function ChatView(): ReactElement {
               handleSend();
             }
           }}
-          placeholder={ended ? "会话已结束（结束并新建以继续）" : "输入消息，Enter 发送"}
-          disabled={ended}
+          placeholder={composer.placeholder}
+          disabled={composer.disabled}
           rows={2}
           style={textareaStyle}
         />
@@ -219,19 +306,69 @@ function ChatView(): ReactElement {
             <Square size={14} />
             <span style={{ marginLeft: "0.3rem" }}>中止</span>
           </button>
+        ) : composer.action === "retry" ? (
+          <button
+            type="button"
+            onClick={() => void retrySession()}
+            style={primaryBtnStyle}
+            title="重试恢复会话"
+          >
+            <RefreshCw size={14} />
+            <span style={{ marginLeft: "0.3rem" }}>重试恢复</span>
+          </button>
         ) : (
           <button
             type="button"
             onClick={handleSend}
-            disabled={ended || draft.trim().length === 0}
-            style={{ ...primaryBtnStyle, opacity: ended || !draft.trim() ? 0.5 : 1 }}
-            title="发送"
+            disabled={composer.disabled || draft.trim().length === 0}
+            style={{
+              ...primaryBtnStyle,
+              opacity: composer.disabled || !draft.trim() ? 0.5 : 1,
+            }}
+            title={composer.action === "recovering" ? "正在恢复" : "发送"}
           >
             <Send size={14} />
-            <span style={{ marginLeft: "0.3rem" }}>发送</span>
+            <span style={{ marginLeft: "0.3rem" }}>
+              {composer.action === "recovering"
+                ? "恢复中"
+                : composer.action === "historical"
+                  ? "历史记录"
+                  : "发送"}
+            </span>
           </button>
         )}
       </footer>
+    </div>
+  );
+}
+
+export function HermesExecutionBackendNotice({
+  profile,
+  workspaceRoot,
+}: {
+  profile: ProviderProfile;
+  workspaceRoot?: string | null;
+}): ReactElement {
+  const pluginWarning = "Hermes plugins 会作为受信代码运行，安装前请确认来源。";
+  if (profile.hermes.executionBackend === "docker") {
+    return (
+      <div style={executionNoticeStyle} data-execution-backend="docker">
+        <strong>Docker 隔离（按需启动）</strong>
+        <span>
+          {workspaceRoot
+            ? `已选择 ${workspaceRoot}，仅映射到容器 /workspace。`
+            : "创建会话时选择的 workspace 将单独映射到容器 /workspace。"}
+          容器按 workspace 分片，工具操作仍走手动审批。{pluginWarning}
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div style={executionNoticeStyle} data-execution-backend="local">
+      <strong>本地执行</strong>
+      <span>
+        Hermes 与当前 macOS 用户相同权限；文件、进程和网络操作仍走手动审批。{pluginWarning}
+      </span>
     </div>
   );
 }
@@ -333,6 +470,35 @@ const setupEmptyStyle: React.CSSProperties = {
   borderRadius: 8,
   color: "#92400e",
   fontSize: "0.85rem",
+};
+
+const executionNoticeStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "0.2rem",
+  margin: "0 0 0.9rem",
+  padding: "0.55rem 0.65rem",
+  border: "1px solid #fde68a",
+  borderRadius: 6,
+  background: "#fffbeb",
+  color: "#78350f",
+  fontSize: "0.75rem",
+  lineHeight: 1.45,
+  overflowWrap: "anywhere",
+};
+
+const runtimeInstallProgressStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "0.15rem",
+  marginTop: "0.7rem",
+  padding: "0.55rem 0.65rem",
+  border: "1px solid #bfdbfe",
+  borderRadius: 6,
+  background: "#eff6ff",
+  color: "#1e3a8a",
+  fontSize: "0.78rem",
+  lineHeight: 1.4,
 };
 
 const fieldLabelStyle: React.CSSProperties = {

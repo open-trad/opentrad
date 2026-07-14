@@ -2,11 +2,17 @@
 // 新增 domain 时在此 register 进来。
 
 import type { CCManager } from "@opentrad/cc-adapter";
+import type { RuntimeAdapter } from "@opentrad/runtime-adapter";
 import type { AgentService } from "../services/agent-service";
 import type { DetectLoopRegistry } from "../services/cc-detect-loop";
 import type { ConnectorService } from "../services/connector-service";
-import type { SafeStorageCredentialStore } from "../services/credential-store";
 import type { DbServices } from "../services/db";
+import type { HermesNetworkEnvironment } from "../services/hermes/network-environment";
+import {
+  createHermesOAuthPtyCoordinator,
+  type HermesOAuthPtyCoordinator,
+  type HermesOAuthPtyCoordinatorOptions,
+} from "../services/hermes/oauth-login";
 import type { McpConfigWriter } from "../services/mcp-writer";
 import type { PtyManager } from "../services/pty-manager";
 import type { IpcRiskGatePrompter } from "../services/risk-gate";
@@ -31,21 +37,44 @@ export interface IpcDeps {
   detectLoop: DetectLoopRegistry;
   riskGatePrompter: IpcRiskGatePrompter;
   agent: AgentService;
-  credentials: SafeStorageCredentialStore;
   connector: ConnectorService;
+  hermesRuntime: RuntimeAdapter | undefined;
+  hermesDataRoot: string;
+  hermesPlatform: HermesOAuthPtyCoordinatorOptions["platform"];
+  hermesNetworkEnvironment: HermesNetworkEnvironment;
+  onHermesOAuthCoordinator?: (coordinator: HermesOAuthPtyCoordinator) => void;
 }
 
 export function registerIpcHandlers(deps: IpcDeps): void {
   registerCcHandlers({ manager: deps.manager, db: deps.db, mcpWriter: deps.mcpWriter });
-  registerAgentHandlers({ agent: deps.agent, credentials: deps.credentials });
+  registerAgentHandlers({ agent: deps.agent });
   registerConnectorHandlers({ connector: deps.connector });
   registerUpdateHandlers();
   registerSessionHandlers(deps.db);
   registerSettingsHandlers(deps.db);
   registerInstalledSkillHandlers(deps.db);
-  registerPtyHandlers(deps.pty);
-  registerInstallerHandlers({ pty: deps.pty, detectLoop: deps.detectLoop });
-  registerAuthHandlers({ pty: deps.pty });
+  const ptyRouter = registerPtyHandlers(deps.pty);
+  registerInstallerHandlers({
+    pty: deps.pty,
+    ptyRouter,
+    detectLoop: deps.detectLoop,
+  });
+  const hermesOAuth = createHermesOAuthPtyCoordinator({
+    dataRoot: deps.hermesDataRoot,
+    platform: deps.hermesPlatform,
+    ...(deps.hermesRuntime ? { runtime: deps.hermesRuntime } : {}),
+    listProfiles: () => deps.agent.listProfiles(),
+    isProfileAvailable: (profileId) => deps.agent.isProfileAvailableForOAuth(profileId),
+    pty: deps.pty,
+    ptyRouter,
+    networkEnvironment: deps.hermesNetworkEnvironment,
+  });
+  deps.onHermesOAuthCoordinator?.(hermesOAuth);
+  registerAuthHandlers({
+    pty: deps.pty,
+    ptyRouter,
+    hermesOAuth,
+  });
   registerSkillHandlers();
   registerRiskGateHandlers({ prompter: deps.riskGatePrompter, db: deps.db });
 }

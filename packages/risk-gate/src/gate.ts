@@ -7,6 +7,8 @@
 //   4. promptUser → 用户决策 + audit(not automated)
 //      4a. allow_always 时调 RuleProvider.save 写规则
 //      4b. timeout / dismiss 走 UserPrompter 内部实现的 5min 超时(A6 补丁)
+//   任一规则、提示、审计依赖异常 → deny(reason='risk_gate_error')；审计 best-effort，绝不放行。
+//   调用方 generation 失效 → deny(reason='request_cancelled')，且不写 allow_always 规则。
 //
 // 业务级 vs 工具级:由 computeBusinessAction 决定:
 // - businessAction 显式提供 → 用之
@@ -33,6 +35,15 @@ export class RiskGate {
   ) {}
 
   async check(req: RiskGateCheckRequest): Promise<CheckResult> {
+    try {
+      return await this.evaluate(req);
+    } catch {
+      await this.appendFailureAudit(req);
+      return { decision: "deny", reason: "risk_gate_error", automated: true };
+    }
+  }
+
+  private async evaluate(req: RiskGateCheckRequest): Promise<CheckResult> {
     const businessAction = this.computeBusinessAction(req);
     const baseEntry = (
       decision: DecisionKind,
@@ -49,6 +60,11 @@ export class RiskGate {
       automated,
       reason,
     });
+
+    if (this.isRequestCancelled(req)) {
+      await this.audit.append(baseEntry("deny", true, "request_cancelled"));
+      return { decision: "deny", reason: "request_cancelled", automated: true };
+    }
 
     // 1. blocked 直接 deny
     if (req.riskLevel === "blocked") {
@@ -69,6 +85,10 @@ export class RiskGate {
       toolName: req.toolName,
       businessAction,
     });
+    if (this.isRequestCancelled(req)) {
+      await this.audit.append(baseEntry("deny", true, "request_cancelled"));
+      return { decision: "deny", reason: "request_cancelled", automated: true };
+    }
     if (rule) {
       const decision: DecisionKind = rule.decision === "allow" ? "allow_always" : "deny";
       await this.audit.append(baseEntry(decision, true, "rule_matched"));
@@ -85,23 +105,41 @@ export class RiskGate {
       businessAction,
       category: req.category ?? null,
     });
+    if (this.isRequestCancelled(req)) {
+      await this.audit.append(baseEntry("deny", true, "request_cancelled"));
+      return { decision: "deny", reason: "request_cancelled", automated: true };
+    }
 
     let mappedDecision: DecisionKind;
     let auditReason: string | null = userDecision.reason ?? null;
+
+    if (userDecision.kind === "allow_always") {
+      // Governance ordering: only persist an always rule after the user decision itself is audited.
+      await this.audit.append(baseEntry("allow_always", false, auditReason));
+      if (this.isRequestCancelled(req)) {
+        await this.audit.append(baseEntry("deny", true, "request_cancelled"));
+        return { decision: "deny", reason: "request_cancelled", automated: true };
+      }
+      await this.rules.save({
+        skillId: req.skillId,
+        toolName: req.toolName,
+        businessAction,
+        decision: "allow",
+      });
+      return {
+        decision: "allow_always",
+        reason: auditReason ?? undefined,
+        automated: false,
+        userKind: userDecision.kind,
+      };
+    }
 
     switch (userDecision.kind) {
       case "allow_once":
         mappedDecision = "allow_once";
         break;
-      case "allow_always":
-        mappedDecision = "allow_always";
-        // 写规则(allow_always 触发);失败不阻塞 decision 返回(audit 仍记录)
-        await this.rules.save({
-          skillId: req.skillId,
-          toolName: req.toolName,
-          businessAction,
-          decision: "allow",
-        });
+      case "allow_session":
+        mappedDecision = "allow_session";
         break;
       case "deny":
         mappedDecision = "deny";
@@ -120,6 +158,32 @@ export class RiskGate {
       automated: false,
       userKind: userDecision.kind,
     };
+  }
+
+  private async appendFailureAudit(req: RiskGateCheckRequest): Promise<void> {
+    try {
+      await this.audit.append({
+        timestamp: Date.now(),
+        sessionId: req.sessionId,
+        skillId: req.skillId,
+        toolName: req.toolName,
+        businessAction: this.computeBusinessAction(req),
+        paramsJson: this.serializeParams(req.params),
+        decision: "deny",
+        automated: true,
+        reason: "risk_gate_error",
+      });
+    } catch {
+      // Audit storage can fail too. Governance stays fail-closed and diagnostics remain private.
+    }
+  }
+
+  private isRequestCancelled(req: RiskGateCheckRequest): boolean {
+    try {
+      return req.isCancelled?.() ?? false;
+    } catch {
+      return true;
+    }
   }
 
   // 业务级触发判断:displayBusinessAction 优先,否则 stopBeforeList 命中 toolName 升级

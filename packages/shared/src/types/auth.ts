@@ -10,6 +10,10 @@
 
 import { z } from "zod";
 
+/** One path-segment-safe identifier contract shared by Profile storage and Hermes metadata. */
+export const HermesProviderIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+export const HermesProviderIdentifierSchema = z.string().regex(HermesProviderIdentifierPattern);
+
 // auth:start-login-flow(Renderer → Main)
 // 主进程通过 PtyManager spawn `claude auth login ...`,返回 ptyId 让 renderer:
 // 1. 用 TerminalPane 渲染 PTY 输出(诊断 + URL 上下文)
@@ -28,6 +32,24 @@ export const AuthStartLoginFlowResponseSchema = z.object({
 
 export type AuthStartLoginFlowRequest = z.infer<typeof AuthStartLoginFlowRequestSchema>;
 export type AuthStartLoginFlowResponse = z.infer<typeof AuthStartLoginFlowResponseSchema>;
+
+// auth:start-hermes-oauth (Renderer → Main)
+// Renderer 只能选择一个已保存的 Profile。官方 command / provider slug / HERMES_HOME
+// 均由 main 根据受信的 Profile 与固定 Hermes 运行时推导，不能由 renderer 覆盖。
+export const HermesOAuthStartRequestSchema = z
+  .object({
+    profileId: HermesProviderIdentifierSchema,
+  })
+  .strict();
+
+export const HermesOAuthStartResponseSchema = z
+  .object({
+    ptyId: z.string().min(1).max(256),
+  })
+  .strict();
+
+export type HermesOAuthStartRequest = z.infer<typeof HermesOAuthStartRequestSchema>;
+export type HermesOAuthStartResponse = z.infer<typeof HermesOAuthStartResponseSchema>;
 
 // shell:open-external(Renderer → Main)
 // 主进程用 electron shell.openExternal(url) 打开系统默认浏览器。

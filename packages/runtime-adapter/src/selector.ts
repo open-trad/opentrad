@@ -6,8 +6,7 @@ export interface RuntimeSelectionInput {
 }
 
 export function selectRuntimeKind(input: RuntimeSelectionInput): RuntimeKind {
-  if (input.envRuntime !== undefined) {
-    return input.envRuntime === "hermes" ? "hermes" : "legacy";
-  }
-  return input.persistedPreference === "hermes" ? "hermes" : "legacy";
+  // Hermes is the product path. Only the exact emergency kill switch may select legacy;
+  // stale preferences and malformed environment values must not silently downgrade runtime.
+  return input.envRuntime === "legacy" ? "legacy" : "hermes";
 }

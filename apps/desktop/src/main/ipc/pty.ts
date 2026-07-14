@@ -4,8 +4,8 @@
 
 import {
   IpcChannels,
-  type PtyDataEvent,
-  type PtyExitEvent,
+  type PtyAttachRequest,
+  PtyAttachRequestSchema,
   type PtyKillRequest,
   PtyKillRequestSchema,
   type PtyResizeRequest,
@@ -16,52 +16,41 @@ import {
   type PtyWriteRequest,
   PtyWriteRequestSchema,
 } from "@opentrad/shared";
-import { ipcMain, type WebContents } from "electron";
+import { ipcMain } from "electron";
 import type { PtyManager } from "../services/pty-manager";
+import { PtySubscriberRouter } from "../services/pty-subscriber-router";
 
-export function registerPtyHandlers(manager: PtyManager): void {
-  // ptyId → spawn 时的 webContents。webContents 销毁时清理。
-  const subscribers = new Map<string, WebContents>();
-
-  manager.on("data", ({ ptyId, data }) => {
-    const wc = subscribers.get(ptyId);
-    if (!wc || wc.isDestroyed()) return;
-    const payload: PtyDataEvent = { ptyId, data };
-    wc.send(IpcChannels.PtyData, payload);
-  });
-
-  manager.on("exit", ({ ptyId, exitCode, signal }) => {
-    const wc = subscribers.get(ptyId);
-    subscribers.delete(ptyId);
-    if (!wc || wc.isDestroyed()) return;
-    const payload: PtyExitEvent = { ptyId, exitCode, signal };
-    wc.send(IpcChannels.PtyExit, payload);
-  });
+export function registerPtyHandlers(manager: PtyManager): PtySubscriberRouter {
+  const router = new PtySubscriberRouter(manager);
 
   ipcMain.handle(IpcChannels.PtySpawn, async (event, raw: unknown): Promise<PtySpawnResponse> => {
     const req: PtySpawnRequest = PtySpawnRequestSchema.parse(raw ?? {});
-    const ptyId = manager.spawn(req);
-    subscribers.set(ptyId, event.sender);
-    // webContents 被关闭时自动清 + kill 该 PTY，避免子进程残留
-    event.sender.once("destroyed", () => {
-      subscribers.delete(ptyId);
-      manager.kill(ptyId);
-    });
+    const ptyId = router.spawnAndBind(req, event.sender);
     return { ptyId };
   });
 
-  ipcMain.handle(IpcChannels.PtyWrite, async (_event, raw: unknown): Promise<void> => {
+  ipcMain.handle(IpcChannels.PtyWrite, async (event, raw: unknown): Promise<void> => {
     const req: PtyWriteRequest = PtyWriteRequestSchema.parse(raw);
+    router.assertOwner(req.ptyId, event.sender);
     manager.write(req.ptyId, req.data);
   });
 
-  ipcMain.handle(IpcChannels.PtyResize, async (_event, raw: unknown): Promise<void> => {
+  ipcMain.handle(IpcChannels.PtyAttach, async (event, raw: unknown): Promise<void> => {
+    const req: PtyAttachRequest = PtyAttachRequestSchema.parse(raw);
+    router.attach(req.ptyId, event.sender);
+  });
+
+  ipcMain.handle(IpcChannels.PtyResize, async (event, raw: unknown): Promise<void> => {
     const req: PtyResizeRequest = PtyResizeRequestSchema.parse(raw);
+    router.assertOwner(req.ptyId, event.sender);
     manager.resize(req.ptyId, req.cols, req.rows);
   });
 
-  ipcMain.handle(IpcChannels.PtyKill, async (_event, raw: unknown): Promise<void> => {
+  ipcMain.handle(IpcChannels.PtyKill, async (event, raw: unknown): Promise<void> => {
     const req: PtyKillRequest = PtyKillRequestSchema.parse(raw);
+    router.close(req.ptyId, event.sender);
     manager.kill(req.ptyId, req.signal);
   });
+
+  return router;
 }

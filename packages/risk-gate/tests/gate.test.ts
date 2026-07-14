@@ -190,6 +190,24 @@ describe("RiskGate.check — 步骤 4:promptUser", () => {
     expect(audit.entries[0]?.automated).toBe(false);
   });
 
+  it("allow_session → allow_session + audit(automated=false),不写持久规则", async () => {
+    const rules = makeFakeRules({});
+    const audit = makeFakeAudit();
+    const prompter = makeFakePrompter({ kind: "allow_session" });
+    const gate = new RiskGate(rules, audit, prompter);
+
+    const result = await gate.check(baseReq());
+
+    expect(result.decision).toBe("allow_session");
+    expect(result.automated).toBe(false);
+    expect(result.userKind).toBe("allow_session");
+    expect(rules.saveCalls).toHaveLength(0);
+    expect(audit.entries[0]).toMatchObject({
+      decision: "allow_session",
+      automated: false,
+    });
+  });
+
   it("allow_always → allow_always + 写规则 + audit(automated=false)", async () => {
     const rules = makeFakeRules({});
     const audit = makeFakeAudit();
@@ -236,18 +254,150 @@ describe("RiskGate.check — 步骤 4:promptUser", () => {
     expect(audit.entries[0]?.reason).toBe("user_requested_edit");
   });
 
-  it("timeout(UserPrompter 内部超时返 deny + reason='timeout')→ audit reason='timeout'", async () => {
+  it.each([
+    "timeout",
+    "no_renderer",
+    "renderer_destroyed",
+    "ipc_send_error",
+  ])("prompt transport fail-closed reason '%s' is denied and audited", async (reason) => {
     const rules = makeFakeRules({});
     const audit = makeFakeAudit();
-    const prompter = makeFakePrompter({ kind: "deny", reason: "timeout" });
+    const prompter = makeFakePrompter({ kind: "deny", reason });
     const gate = new RiskGate(rules, audit, prompter);
 
     const result = await gate.check(baseReq());
 
     expect(result.decision).toBe("deny");
-    expect(result.reason).toBe("timeout");
-    expect(audit.entries[0]?.reason).toBe("timeout");
+    expect(result.reason).toBe(reason);
+    expect(audit.entries[0]?.reason).toBe(reason);
     expect(audit.entries[0]?.automated).toBe(false);
+  });
+});
+
+describe("RiskGate.check — infrastructure fail closed", () => {
+  it("denies and audits a rule lookup failure without exposing its diagnostics", async () => {
+    const rules = makeFakeRules({});
+    vi.mocked(rules.findMatching).mockRejectedValueOnce(
+      new Error("database failed with sensitive diagnostics"),
+    );
+    const audit = makeFakeAudit();
+    const gate = new RiskGate(rules, audit, makeFakePrompter({ kind: "allow_once" }));
+
+    const result = await gate.check(baseReq());
+
+    expect(result).toEqual({ decision: "deny", reason: "risk_gate_error", automated: true });
+    expect(audit.entries).toEqual([
+      expect.objectContaining({
+        sessionId: "sess-1",
+        decision: "deny",
+        automated: true,
+        reason: "risk_gate_error",
+      }),
+    ]);
+    expect(JSON.stringify({ result, entries: audit.entries })).not.toContain(
+      "sensitive diagnostics",
+    );
+  });
+
+  it("denies and audits when the renderer prompt transport rejects", async () => {
+    const audit = makeFakeAudit();
+    const prompter: UserPrompter = {
+      request: vi.fn().mockRejectedValue(new Error("renderer IPC unavailable")),
+    };
+    const gate = new RiskGate(makeFakeRules({}), audit, prompter);
+
+    const result = await gate.check(baseReq());
+
+    expect(result).toEqual({ decision: "deny", reason: "risk_gate_error", automated: true });
+    expect(audit.entries[0]).toMatchObject({
+      decision: "deny",
+      automated: true,
+      reason: "risk_gate_error",
+    });
+  });
+
+  it("denies and audits when an always rule cannot be persisted", async () => {
+    const rules = makeFakeRules({});
+    vi.mocked(rules.save).mockRejectedValueOnce(new Error("rule storage unavailable"));
+    const audit = makeFakeAudit();
+    const gate = new RiskGate(rules, audit, makeFakePrompter({ kind: "allow_always" }));
+
+    const result = await gate.check(baseReq());
+
+    expect(result).toEqual({ decision: "deny", reason: "risk_gate_error", automated: true });
+    expect(audit.entries).toEqual([
+      expect.objectContaining({
+        decision: "allow_always",
+        automated: false,
+        reason: null,
+      }),
+      expect.objectContaining({
+        decision: "deny",
+        automated: true,
+        reason: "risk_gate_error",
+      }),
+    ]);
+    expect(rules.saveCalls).toEqual([]);
+  });
+
+  it("still denies when the audit store itself is unavailable", async () => {
+    const audit: AuditLogger = {
+      append: vi.fn().mockRejectedValue(new Error("audit storage unavailable")),
+    };
+    const gate = new RiskGate(makeFakeRules({}), audit, makeFakePrompter({ kind: "allow_once" }));
+
+    await expect(gate.check(baseReq())).resolves.toEqual({
+      decision: "deny",
+      reason: "risk_gate_error",
+      automated: true,
+    });
+  });
+
+  it("does not persist allow_always when its decision cannot be audited", async () => {
+    const rules = makeFakeRules({});
+    const audit: AuditLogger = {
+      append: vi.fn().mockRejectedValue(new Error("audit storage unavailable")),
+    };
+    const gate = new RiskGate(rules, audit, makeFakePrompter({ kind: "allow_always" }));
+
+    await expect(gate.check(baseReq())).resolves.toEqual({
+      decision: "deny",
+      reason: "risk_gate_error",
+      automated: true,
+    });
+    expect(rules.saveCalls).toEqual([]);
+  });
+});
+
+describe("RiskGate.check — request lifecycle cancellation", () => {
+  it("does not persist allow_always after the originating session generation is cancelled", async () => {
+    const rules = makeFakeRules({});
+    const audit = makeFakeAudit();
+    let cancelled = false;
+    const decision = new Promise<UserDecision>((resolve) => {
+      setImmediate(() => {
+        cancelled = true;
+        resolve({ kind: "allow_always" });
+      });
+    });
+    const gate = new RiskGate(rules, audit, {
+      request: async () => decision,
+    });
+
+    const result = await gate.check({
+      ...baseReq(),
+      isCancelled: () => cancelled,
+    } as RiskGateCheckRequest & { isCancelled: () => boolean });
+
+    expect(result).toEqual({ decision: "deny", reason: "request_cancelled", automated: true });
+    expect(rules.saveCalls).toEqual([]);
+    expect(audit.entries).toEqual([
+      expect.objectContaining({
+        decision: "deny",
+        automated: true,
+        reason: "request_cancelled",
+      }),
+    ]);
   });
 });
 

@@ -12,13 +12,28 @@ import { AgentService } from "./services/agent-service";
 import { DetectLoopRegistry } from "./services/cc-detect-loop";
 import { ConnectorService } from "./services/connector-service";
 import { SafeStorageCredentialStore } from "./services/credential-store";
-import { createDbServices, type DbServices, getIpcSocketPath } from "./services/db";
+import { createDbServices, type DbServices, getIpcSocketPath, getUserDataDir } from "./services/db";
+import { createDesktopRuntime } from "./services/desktop-runtime";
+import {
+  createHermesCommandRunner,
+  HERMES_COMMAND_MAX_TIMEOUT_MS,
+} from "./services/hermes/command-runner";
+import { createHermesDockerPreflight } from "./services/hermes/docker-preflight";
+import { resolveHermesNetworkEnvironment } from "./services/hermes/network-environment";
+import type { HermesOAuthPtyCoordinator } from "./services/hermes/oauth-login";
+import { createHermesProfileHomeDeleter } from "./services/hermes/profile-home";
+import { resolveHermesLauncherPath } from "./services/hermes/resource-paths";
+import { createHermesRuntimeInstallProgressBroadcaster } from "./services/hermes/runtime-install-progress";
+import { HermesRuntimeInstaller } from "./services/hermes/runtime-installer";
+import { HermesInteractionPrompter } from "./services/hermes-interaction-prompter";
 import { createIpcBridgeHandlers } from "./services/ipc-bridge-handlers";
 import { IpcBridgeServer } from "./services/ipc-bridge-server";
 import { type AppLock, AppLockHeldError, acquireAppLock } from "./services/lock";
 import { McpConfigWriter } from "./services/mcp-writer";
 import { PtyManager } from "./services/pty-manager";
 import { createRiskGate, type RiskGateBundle, type SkillContext } from "./services/risk-gate";
+import { createShutdownCoordinator } from "./services/shutdown-coordinator";
+import { validateWorkspaceRoot } from "./services/workspace-root";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -27,7 +42,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ICON_PATH = join(__dirname, "..", "..", "build", "icon.png");
 
 // 全局 CCManager 单例：所有 IPC handler 共享同一个 manager 以维持 activeTasks map。
-const ccManager = new CCManager();
+const ccManager = new CCManager({ installExitHandlers: false });
 
 // 全局 PtyManager 单例：跨窗口共享，路由由 IPC handler 内部 ptyId → webContents 管理。
 const ptyManager = new PtyManager();
@@ -51,14 +66,25 @@ let ipcBridgeServer: IpcBridgeServer | undefined;
 let riskGateBundle: RiskGateBundle | undefined;
 // M0 spike（重启方向）：自建 agent loop 的服务与 safeStorage 凭证仓
 let agentService: AgentService | undefined;
+let hermesOAuthCoordinator: HermesOAuthPtyCoordinator | undefined;
+let hermesInteractionPrompter: HermesInteractionPrompter | undefined;
 let credentialStore: SafeStorageCredentialStore | undefined;
 // M0.5：bb-browser 选品连接器服务
 let connectorService: ConnectorService | undefined;
 // 主窗口引用,RiskGate UserPrompter 通过 getMainWindow getter 拿
 let mainWindow: BrowserWindow | undefined;
+const shutdownCoordinator = createShutdownCoordinator({
+  cleanup: performShutdown,
+  exit: (code) => app.exit(code),
+  onCleanupError: (error, trigger) => {
+    console.error(`[main] shutdown cleanup failed (${trigger})`, error);
+  },
+});
 
 // contextIsolation + sandbox 按 03-architecture.md §9「沙箱和权限」开启。
-function createMainWindow(): BrowserWindow {
+function createMainWindow(): BrowserWindow | undefined {
+  if (!shutdownCoordinator.canCreateMainWindow()) return undefined;
+
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -79,7 +105,7 @@ function createMainWindow(): BrowserWindow {
   });
 
   win.once("ready-to-show", () => {
-    win.show();
+    if (shutdownCoordinator.canCreateMainWindow()) win.show();
   });
 
   const devUrl = process.env.ELECTRON_RENDERER_URL;
@@ -89,10 +115,15 @@ function createMainWindow(): BrowserWindow {
     void win.loadFile(join(__dirname, "../renderer/index.html"));
   }
 
+  win.on("close", () => {
+    void shutdownCoordinator.requestShutdown("window-close");
+  });
+
   win.on("closed", () => {
     if (mainWindow === win) mainWindow = undefined;
     // 清 RiskGate pending prompts(回 deny + reason='renderer_destroyed')
     riskGateBundle?.prompter.cleanupAll();
+    hermesInteractionPrompter?.cleanupAll();
   });
 
   return win;
@@ -133,7 +164,7 @@ function resolveSkillContext(sessionId: string): SkillContext {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // macOS dock 图标（dev 模式；打包后由 electron-builder 设置）。失败静默。
   if (process.platform === "darwin" && app.dock) {
     try {
@@ -179,12 +210,71 @@ app.whenReady().then(() => {
   // M0 spike：safeStorage 凭证仓 + AgentService（自建 loop 会话管理，
   // 审批钩子桥接上面的 riskGateBundle.gate——与 CC 通道共用同一套规则/审计/弹窗）。
   credentialStore = new SafeStorageCredentialStore(dbServices.db, safeStorage);
+  hermesInteractionPrompter = new HermesInteractionPrompter(() => mainWindow ?? null);
+  const dataRoot = getUserDataDir();
+  const deleteProfileHome = createHermesProfileHomeDeleter({
+    dataRoot,
+    platform: hostHermesPlatform(),
+  });
+  const profileHomeRecovery = await deleteProfileHome.recover(
+    dbServices.providerProfiles.listRaw(),
+  );
+  const hermesNetworkEnvironment = resolveHermesNetworkEnvironment();
+  const runtimeCommandEnvironment = Object.freeze({
+    ...installerEnvironment(process.env),
+    ...hermesNetworkEnvironment,
+  });
+  const installer = new HermesRuntimeInstaller({
+    dataRoot,
+    resourcesRoot: app.isPackaged
+      ? join(process.resourcesPath, "hermes")
+      : join(app.getAppPath(), "resources", "hermes"),
+    runner: createHermesCommandRunner({
+      cwd: dataRoot,
+      env: runtimeCommandEnvironment,
+      timeoutMs: HERMES_COMMAND_MAX_TIMEOUT_MS,
+    }),
+  });
+  const validateExecutionBackend = createHermesDockerPreflight({
+    runner: createHermesCommandRunner({
+      cwd: dataRoot,
+      env: runtimeCommandEnvironment,
+    }),
+  });
+  const broadcastHermesRuntimeInstallProgress = createHermesRuntimeInstallProgressBroadcaster(() =>
+    BrowserWindow.getAllWindows(),
+  );
+  const runtime = createDesktopRuntime({
+    envRuntime: process.env.OPENTRAD_RUNTIME,
+    dataRoot,
+    launcherPath: resolveHermesLauncherPath(
+      app.isPackaged
+        ? { mode: "packaged", resourcesPath: process.resourcesPath }
+        : { mode: "development", appPath: app.getAppPath() },
+      hostHermesPlatform(),
+    ),
+    listProfiles: () => dbServices?.providerProfiles.listRaw() ?? [],
+    credentials: credentialStore,
+    installer,
+    onInstallProgress: broadcastHermesRuntimeInstallProgress,
+    networkEnvironment: hermesNetworkEnvironment,
+  });
   agentService = new AgentService({
     profiles: dbServices.providerProfiles,
     agentEvents: dbServices.agentEvents,
     agentSessions: dbServices.agentSessions,
+    agentRuntimeBindings: dbServices.agentRuntimeBindings,
     credentials: credentialStore,
     gate: riskGateBundle.gate,
+    hermesInteractionPrompter,
+    deleteProfileHome,
+    initiallyBlockedProfileIds: profileHomeRecovery.blockedProfileIds,
+    invalidateOAuthProfile: async (profileId) => {
+      const coordinator = hermesOAuthCoordinator;
+      if (!coordinator) throw new Error("Hermes OAuth coordinator is unavailable");
+      await coordinator.invalidateProfile(profileId);
+    },
+    ...(runtime ? { runtime, validateWorkspaceRoot, validateExecutionBackend } : {}),
   });
   // M0.5：bb-browser 选品连接器服务（预检 + 启用站点持久化）
   connectorService = new ConnectorService(dbServices.settings);
@@ -197,14 +287,20 @@ app.whenReady().then(() => {
     detectLoop: detectLoopRegistry,
     riskGatePrompter: riskGateBundle.prompter,
     agent: agentService,
-    credentials: credentialStore,
     connector: connectorService,
+    hermesRuntime: runtime,
+    hermesDataRoot: dataRoot,
+    hermesPlatform: hostHermesPlatform(),
+    hermesNetworkEnvironment,
+    onHermesOAuthCoordinator: (coordinator) => {
+      hermesOAuthCoordinator = coordinator;
+    },
   });
   mainWindow = createMainWindow();
 
   // macOS 点 dock icon 重启窗口（Electron 推荐行为）
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
+    if (shutdownCoordinator.canCreateMainWindow() && BrowserWindow.getAllWindows().length === 0) {
       mainWindow = createMainWindow();
     }
   });
@@ -217,27 +313,34 @@ app.on("window-all-closed", () => {
   }
 });
 
-// 应用退出前清理 CC 子进程（避免 claude 残留）+ 关闭 db + 释放 lock。
-// CCManager 内部也注册了 SIGINT/SIGTERM/exit handler，这里是业务层再加一道保险。
-app.on("before-quit", async (event) => {
-  if (ccManager.activeTasks.size > 0) {
-    event.preventDefault();
-    await ccManager.cleanup();
-    finalizeShutdown();
-    app.quit();
-    return;
-  }
-  finalizeShutdown();
+// 所有退出入口共用一个幂等协调器。cleanup 完成后直接 app.exit，避免再次触发
+// before-quit 并在窗口关闭、系统信号并发到达时重复释放资源。
+app.on("before-quit", (event) => {
+  event.preventDefault();
+  void shutdownCoordinator.requestShutdown("before-quit");
 });
 
-function finalizeShutdown(): void {
-  // agent 会话清理（中止 loop + 卸载 MCP 子进程）；async 但退出路径上 fire-and-forget
+process.once("SIGINT", () => {
+  void shutdownCoordinator.requestShutdown("SIGINT");
+});
+
+process.once("SIGTERM", () => {
+  void shutdownCoordinator.requestShutdown("SIGTERM");
+});
+
+async function performShutdown(): Promise<void> {
   try {
-    void agentService?.disposeAll().catch((err) => {
-      console.error("[main] agent service dispose error", err);
-    });
+    if (ccManager.activeTasks.size > 0) {
+      await ccManager.cleanup();
+    }
   } catch (err) {
-    console.error("[main] agent service dispose sync error", err);
+    console.error("[main] CC cleanup error", err);
+  }
+  // Hermes session.close and Sidecar termination must finish before SQLite is closed.
+  try {
+    await agentService?.disposeAll();
+  } catch (err) {
+    console.error("[main] agent service dispose error", err);
   }
   try {
     detectLoopRegistry.cleanupAll();
@@ -249,14 +352,10 @@ function finalizeShutdown(): void {
   } catch (err) {
     console.error("[main] pty cleanup error", err);
   }
-  // IPC bridge server stop 是 async，但 finalizeShutdown 里同步调；
-  // 用 .catch 保护，主进程已经在退出路径上，stop 失败也无所谓
   try {
-    void ipcBridgeServer?.stop().catch((err) => {
-      console.error("[main] ipc-bridge stop error", err);
-    });
+    await ipcBridgeServer?.stop();
   } catch (err) {
-    console.error("[main] ipc-bridge stop sync error", err);
+    console.error("[main] ipc-bridge stop error", err);
   }
   try {
     dbServices?.close();
@@ -268,4 +367,29 @@ function finalizeShutdown(): void {
   } catch (err) {
     console.error("[main] lock release error", err);
   }
+}
+
+function hostHermesPlatform(): "darwin" | "linux" | "win32" {
+  if (process.platform === "win32") return "win32";
+  if (process.platform === "linux") return "linux";
+  return "darwin";
+}
+
+function installerEnvironment(
+  source: Readonly<NodeJS.ProcessEnv>,
+): Readonly<Record<string, string>> {
+  const result: Record<string, string> = {};
+  for (const key of ["HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"] as const) {
+    const value = source[key];
+    if (
+      typeof value === "string" &&
+      value.length > 0 &&
+      !value.includes("\0") &&
+      !value.includes("\n") &&
+      !value.includes("\r")
+    ) {
+      result[key] = value;
+    }
+  }
+  return result;
 }

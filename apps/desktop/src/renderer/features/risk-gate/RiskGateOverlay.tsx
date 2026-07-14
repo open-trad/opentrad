@@ -12,7 +12,7 @@ import { type ReactElement, useCallback, useEffect, useState } from "react";
 import { BusinessActionCard } from "./BusinessActionCard";
 import { RiskGateDialog } from "./RiskGateDialog";
 
-type DecisionKind = "allow_once" | "allow_always" | "deny" | "request_edit";
+type DecisionKind = "allow_once" | "allow_session" | "allow_always" | "deny" | "request_edit";
 
 export function RiskGateOverlay(): ReactElement | null {
   const [queue, setQueue] = useState<RiskGateConfirmPayload[]>([]);

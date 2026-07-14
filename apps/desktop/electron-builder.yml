@@ -22,14 +22,14 @@ files:
   - package.json
   - "!**/*.map"
 
-# Python 必须从真实文件路径启动，不能放进 app.asar。launcher 会固定校验并加载
-# 同目录 runtime；这里只复制这两个 OpenTrad-owned boundary 文件。
+# Python 必须从真实文件路径启动，不能放进 app.asar。这里只复制 OpenTrad 的
+# stdlib-only 薄启动器和固定哈希依赖锁；Hermes 本体来自哈希锁定的受管 runtime。
 extraResources:
   - from: resources/hermes
     to: hermes
     filter:
       - opentrad_hermes_launcher.py
-      - opentrad_hermes_runtime.py
+      - hermes-agent-0.18.2-base-requirements.txt
 
 # native .node 必须从 asar 解出才能 dlopen
 asarUnpack:
